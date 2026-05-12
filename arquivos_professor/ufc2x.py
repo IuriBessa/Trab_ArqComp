@@ -1,25 +1,28 @@
+#chama o arquivo de memoria para que seja possivel a leitura
 import memory
 from array import array
 
-MPC = 0
-MIR = 0
 
-MAR = 0
-MDR = 0
-PC = 0
-MBR = 0
-X = 0
-Y = 0
-H = 0
+MPC = 0 #diz qual instrução i está sendo executada agora como firmware[i].
+MIR = 0 #recebe o conteudo que a microinstrução apontou e guarda p levar p ula
+ 
+#MDR é linkado com MAR e MBR comm PC
+MAR = 0 #endereço i que se quer escrever ou ler algo na memoria
+MDR = 0 #depois de ler o valor esperado vem pra cá, ou se coloca aqui o valor antes de escrever trabalha com words
+PC = 0 #guarda o ENDEREÇO de onde foram escritas as instruções a serem feitas
+MBR = 0 #Usado para ler as macroinstruçoes(so trabalha com bytes) 
+X = 0 #Registrador principal para cálculos, onde os resultados ficam
+Y = 0 # ainda não é usado.                                                                                                                                                   URGENTE
+H = 0 #registrador temporario, "rascunho p contas c 2 valores"
 
-N = 0
+N = 0  #indicadores de estado
 Z = 1
 
-BUS_A = 0
-BUS_B = 0
-BUS_C = 0
+BUS_A = 0 #sempre carrega o valor de H, é a entrada da A da ula
+BUS_B = 0 #sempre carrega o valor do registrador escolhido, entrada b da ula
+BUS_C = 0 #carrega o resultado que vai p os registradores
 
-firmware = array('L',[0]) * 512
+firmware = array('L',[0]) * 512  #cria um espaço que guarda as microinstruções
 
 #MICROPROGRAMA:
 
@@ -117,9 +120,9 @@ def alu(control_bits):
     o = 0
     
     shift_bits = control_bits & 0b11000000
-    shift_bits = shift_bits >> 6
+    shift_bits = shift_bits >> 6 # aqui se guarda os bits de deslocamento
 
-    control_bits = control_bits & 0b00111111
+    control_bits = control_bits & 0b00111111  #aqui se guarda os bits que controlam
     
     if control_bits == 0b011000:
        o = a
