@@ -1,0 +1,80 @@
+Questionamentos principais:
+**É interessante que criemos no assembler as instrucoes de deslocamento de bits (<< 1, >> 1, << 8) pois na ALU são executadas
+depois da operação principal, ocupando o mesmo ciclo mas sem instrução correspondente
+no assembler — o programador não pode usá-las diretamente. 
+Expor essas operações como instruções (shl, shr) permitiria multiplicações e divisões por 2 em apenas 1 ciclo em vez de vários. (c)
+
+  
+1.Criar um IR otimizaria o processador descobrecarregando o MBR? (g) EXPPLIÇÃO MAIOR ABAIXO.
+2.Porque N e Z estão realmente precisando ser opostos? (g)
+3.Como aproveitar o Y que não está sendo utilizado no código? (g)
+4.Cada micro-instrução de "buscar e executar" uma instrução custa vários ciclos. Por exemplo,add precisa de 4 micro-instruções (ciclos 2, 3, 4 e 5).
+isso é chamado de "latência" algumas dessas etapas poderiam ser fundidas — por exemplo, 
+ler a memória e carregar H em um único passo — reduzindo add de 4 para 3 ciclos. Isso seria implementar um ir?, como fazer isso na pratica p fundir (c)
+o próprio MIR costuma ter um pedaço (alguns bits) dedicado exclusivamente a dizer qual é o próximo endereço padrão ou para onde pular.
+5.firmware = array('L',[0]) * 512 Esta linha cria o firmware — a memória interna do processador que guarda as micro-instruções.
+array('L', [0]) — cria um array com um único elemento zero, do tipo L (unsigned long, inteiro sem sinal de 32 bits)
+* 512 — replica isso 512 vezes, criando 512 posições 512 posições porque o endereço de próxima micro-instrução tem 9 bits, e 2⁹ = 512. 
+Então o firmware pode ter no máximo 512 micro-instruções diferentes. Isso faz com que eu acesse menos memoria doq deveria ou deve ser feito assim mesmo?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  Quem está fazendo o papel do IR, de forma adaptada, é o MBR (Memory Byte Buffer Register).
+
+Vou te explicar exatamente o porquê disso estar acontecendo e como o seu circuito funciona:
+
+Por que o MBR virou o "IR"?
+Em um processador completo e maior, o fluxo normal seria:
+
+Buscar o opcode na memória usando o endereço do PC.
+
+Jogar esse dado no MBR.
+
+Copiar o conteúdo do MBR para o IR.
+
+A Unidade de Controle lê o IR para decidir qual microprograma rodar.
+
+Porém, como este modelo é uma simplificação didática baseada em instruções de 1 byte de opcode (como dá para ver no seu firmware[0] e firmware[10]), os projetistas cortaram caminho para economizar hardware (e código). O valor do opcode lido da memória RAM fica guardado diretamente no MBR e é consumido dali mesmo!
+
+A prova disso no seu próprio código
+Destaquei duas partes do seu código onde o MBR age exatamente como se fosse o IR (guardando a macro-instrução para decidir o desvio do firmware):
+
+1. Na instrução de FETCH (firmware[0])
+Python
+# 0: INIT
+firmware[0] = 0b000000000_100_00110101_001000_001_001 
+# BUS_C = PC + 1; PC = BUS_C; MBR = memory.read_byte(PC) (FETCH); GOTO MBR.
+Aqui, o processador lê a próxima macro-instrução do usuário e joga no MBR. Logo em seguida, ele faz um GOTO MBR. Pular para o valor que está no MBR significa usar o opcode guardado nele para indexar o firmware (ex: se o programa do usuário leu 2, o MPC vai saltar direto para o firmware[2]). Isso é pura decodificação de instrução, o papel clássico do IR!
+
+2. Na função next_instruction
+Python
+if jam & 0b100:
+    nextadd = nextadd | MBR
+O bit de JAMN (ou JMPC) ativa essa linha. Ela faz um OR binário entre o endereço base e o conteúdo do MBR para forçar o MPC a ir para a linha do firmware correspondente à instrução que o usuário mandou rodar.
+
+Resumo da ópera
+Neste computador que você está emulando:
+
+O MBR tem dupla identidade: ele serve tanto para segurar os dados temporários que vêm da memória quanto para segurar o Opcode da Macro-instrução atual.
+
+Portanto, o MBR e o IR são o mesmo registrador na prática.
