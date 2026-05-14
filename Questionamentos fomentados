@@ -15,8 +15,9 @@ o próprio MIR costuma ter um pedaço (alguns bits) dedicado exclusivamente a di
 5.firmware = array('L',[0]) * 512 Esta linha cria o firmware — a memória interna do processador que guarda as micro-instruções.
 array('L', [0]) — cria um array com um único elemento zero, do tipo L (unsigned long, inteiro sem sinal de 32 bits)
 * 512 — replica isso 512 vezes, criando 512 posições 512 posições porque o endereço de próxima micro-instrução tem 9 bits, e 2⁹ = 512. 
-Então o firmware pode ter no máximo 512 micro-instruções diferentes. Isso faz com que eu acesse menos memoria doq deveria ou deve ser feito assim mesmo?
-
+Então o firmware pode ter no máximo 512 micro-instruções diferentes. Isso faz com que eu acesse menos memoria doq deveria ou deve ser feito assim mesmo? esse de receber um 
+L faz com que eu receba só 32 bits? eu preciso aumentar?
+Implementar no firmware DESLCAMENTO, MULTIPLICAÇÃO DIVISÃO.
 
 
 
