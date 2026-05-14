@@ -1,0 +1,10 @@
+if o == 0:
+    N = 0
+    Z = 1
+elif o & 0x80000000:    
+    N = 1
+    Z = 0
+else:
+    N = 0
+    Z = 0
+#alteração de o que são N e Z para que agora N signifique negativo e Z signifique se é 0 ou não.
