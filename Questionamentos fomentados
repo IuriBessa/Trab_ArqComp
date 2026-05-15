@@ -3,6 +3,9 @@ Questionamentos principais:
 depois da operação principal, ocupando o mesmo ciclo mas sem instrução correspondente
 no assembler — o programador não pode usá-las diretamente. 
 Expor essas operações como instruções (shl, shr) permitiria multiplicações e divisões por 2 em apenas 1 ciclo em vez de vários. (c)
+**É interessante criar um firmware para organizar um >, ja tem as intrucoes necessaris, é importante apenas formular como fazer esse
+fimware observando a composicao de um firmware e usando o BUS_A - BUS_B da alu.
+**É interessante estudar para que BUS_A não seja sempre igual à H, para que possamos fazer mais operações.
 
   
 1.Criar um IR otimizaria o processador descobrecarregando o MBR? (g) EXPPLIÇÃO MAIOR ABAIXO.
