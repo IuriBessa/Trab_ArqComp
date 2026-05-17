@@ -24,22 +24,35 @@ Implementar no firmware DESLCAMENTO, MULTIPLICAÇÃO DIVISÃO.
 
 
 
+Questionamentos 2:
+Você tem apenas X, Y, H visíveis para o programador. H é só rascunho interno. Na prática o assembler tem 2 registradores de propósito geral.
+Impacto: Força uso de memória para guardar temporários, custando 2–3 ciclos por acesso (MAR, READ/WRITE, MDR).
+Solução: Adicionar registradores, por exemplo Z1, Z2 (evitando conflito com seu flag Z). No layout do MIR você tem 3 bits para BUS_A e 3 bits para BUS_B — isso suporta até 8 fontes cada, e hoje você só usa 6. Sobram 2 slots livres em cada barramento.
 
 
 
+Problema: a & b e a | b existem, mas ambos os operandos vêm de registradores. Não existe forma de fazer X & 1 sem antes carregar 1 num registrador ou na memória.
+Impacto direto: Impossibilita testar bits individuais de forma eficiente — bloqueia shift-and-add, máscaras, flags de paridade.
+Solução: Adicionar uma constante implícita na ALU. Dois caminhos:
+Simples: Adicionar o = a & 1 e o = a | 1 como operações novas (aproveitando bits [7:6] do campo ALU que você usa para shift — reorganizando).
+Melhor: Adicionar um registrador IMM (imediato) que o fetch carrega com o próximo byte, similar ao MBR mas para operandos, não endereços.
+
+
+Campo ALU — Bits desperdiçados
+Problema: O campo ALU tem 8 bits, mas shift ocupa os 2 mais significativos [7:6] e a operação usa 6 bits [5:0]. Porém, dos 64 valores possíveis nos 6 bits, você usa apenas 16 operações. Sobram 48 combinações sem uso.
+Solução: Usar combinações livres para operações compostas úteis como:
+
+a & 1 — testa bit 0 (essencial pra multiplicação)
+a XOR b — muito útil, hoje ausente
+|a| — valor absoluto
+a & 0xFF — máscara de byte
 
 
 
-
-
-
-
-
-
-
-
-
-
+Flags N e Z — Só atualizadas pela ALU
+Problema: N e Z são atualizados a cada operação ALU, mesmo quando você não quer (ex: ao mover dados com ALU=B para carregar MAR, você sobrescreve as flags acidentalmente).
+Impacto: Em sequências como "carrega endereço, lê memória, testa resultado", as flags do teste podem ser corrompidas pelo ciclo de carga.
+Solução: Adicionar 1 bit no MIR chamado SAVE_FLAGS — quando 0, a ALU opera mas não atualiza N/Z. Só custa 1 bit no MIR.
 
 
 
