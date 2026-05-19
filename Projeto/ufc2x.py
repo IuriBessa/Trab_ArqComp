@@ -1,6 +1,6 @@
 # ufc2x.py
 # chama o arquivo de memoria para que seja possivel a leitura
-import memoria  # CORRIGIDO: era 'import memory'
+import memory 
 from array import array
 
 
@@ -344,11 +344,11 @@ def memory_io(mem_bits):
     global PC, MAR, MDR, MBR
     
     if mem_bits & 0b001:
-       MBR = memoria.read_byte(PC)
+       MBR = memory.read_byte(PC)
     if mem_bits & 0b010:
-       MDR = memoria.read_word(MAR)
+       MDR = memory.read_word(MAR)
     if mem_bits & 0b100:
-       memoria.write_word(MAR, MDR)
+       memory.write_word(MAR, MDR)
 
 def step():
    global MIR, MPC
