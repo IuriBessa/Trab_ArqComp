@@ -95,3 +95,102 @@ Neste computador que você está emulando:
 O MBR tem dupla identidade: ele serve tanto para segurar os dados temporários que vêm da memória quanto para segurar o Opcode da Macro-instrução atual.
 
 Portanto, o MBR e o IR são o mesmo registrador na prática.
+
+
+
+1. Registrador H inacessível via software (maior impacto)
+Problema: H só é usado em SWAP (48). Para Fibonacci você precisa de 3 variáveis simultâneas (fib_n, fib_n1, temp), forçando mem[addr] stores/loads custando 3 ciclos cada.
+Solução: Adicionar instruções de acesso a H:
+python# H = X (opcode 53) — 1 ciclo
+firmware[53] = 0b000000000_000_00010100_000001_000_000_011
+# X = H (opcode 54) — 1 ciclo
+firmware[54] = 0b000000000_000_00011000_000100_000_000_000
+# H = Y (opcode 55) — 1 ciclo
+firmware[55] = 0b000000000_000_00010100_000001_000_000_100
+# Y = H (opcode 56) — 1 ciclo
+firmware[56] = 0b000000000_000_00011000_000010_000_000_000
+Fibonacci sem H: cada iteração precisa de 2-3 mem ops (~6-9 ciclos extras por loop).
+Fibonacci com H: loop de ~4-5 ciclos/iteração.
+
+2. Branches condicionais para Y inexistentes
+Problema: Só existe IF Y == 0 (opcode 35). Para loops de contagem regressiva, a falta de IF Y <= 0 força código extra (Y--, testar, tratar -1), custando ~3 ciclos adicionais por iteração.
+Solução:
+python# IF Y <= 0 GOTO addr (opcode 57) — JAM=011 (N|Z) testando Y
+# Ciclo 57: testa Y; se N|Z → GOTO 313 (57|256), senão GOTO 58
+firmware[57]  = 0b000111010_011_00010100_000000_000_000_100
+# Ciclo 58 (Y>0): descarta byte de endereço
+firmware[58]  = 0b000000000_000_00110101_001000_000_010_001
+# Ciclo 313 (Y<=0): GOTO 9
+firmware[313] = 0b000001001_000_00010100_000000_000_000_000
+
+# IF Y < 0 GOTO addr (opcode 59) — JAM=010 (N)
+firmware[59]  = 0b000111101_010_00010100_000000_000_000_100
+firmware[60]  = 0b000000000_000_00110101_001000_000_010_001
+firmware[316] = 0b000001001_000_00010100_000000_000_000_000
+
+3. Falta Y = Y - mem[addr]
+Problema: Existe Y = Y + mem[addr] (opcode 25) mas não o simétrico. Subtração em Y exige sequência SWAP → X = X - mem[addr] → SWAP, custando ~8 ciclos extras.
+Solução:
+python# Y = Y - mem[addr] (opcode 61) — 3 ciclos
+firmware[61] = 0b000111111_000_00110101_001000_001_010_001  # PC++; FETCH; GOTO 62
+firmware[62] = 0b000111110_000_00010100_100000_010_000_010  # MAR=MBR; READ; GOTO 63
+# BUS_A=MDR(001), BUS_B=Y(100), ALU=B-A(00111111), WRITE=Y(000010)
+firmware[63] = 0b000000000_000_00111111_000010_000_001_100  # Y=Y-MDR; GOTO 0
+
+4. Ausência de X = X AND Y / X = X OR Y
+Para o Programa 4 (maior que), a comparação pode ser implementada com shifts e ANDs sem branches adicionais:
+python# X = X AND Y (opcode 64)
+# BUS_A=Y(101), BUS_B=X(011), ALU=A&B(00001100), WRITE=X(000100)
+firmware[64] = 0b000000000_000_00001100_000100_000_101_011
+
+# X = X OR Y (opcode 65)
+# BUS_A=Y(101), BUS_B=X(011), ALU=A|B(00011100), WRITE=X(000100)
+firmware[65] = 0b000000000_000_00011100_000100_000_101_011
+
+
+
+Sugestões concretas
+1. IF X_ODD GOTO addr — teste de bit LSB (1–2 ciclos)
+Impacto: multiplicação e fatorial
+Atualmente, para testar se X é ímpar (necessário no shift-and-add), é preciso fazer X = X AND 1 via memória ou subtrações. Uma instrução que testa o bit 0 diretamente:
+firmware[N] = JAM baseado em (X & 1), sem alterar X
+Isso reduz um laço de multiplicação de ~8 instruções para ~5 por iteração de bit.
+
+2. X = X + imediato / X = imediato com byte do MBR — carga sem acesso à memória (1 ciclo vs 3)
+Impacto: todos os programas
+Você já tem MBR disponível no BUS_B. Adicionar:
+
+40i: X = MBR (depois do FETCH do opcode seguinte) — carrega constante em 1 ciclo extra ao invés de 3 ciclos de READ.
+2i: X = X + MBR — adição com imediato
+
+Fatorial e Fibonacci precisam muito de carregar constantes (0, 1, N).
+
+3. CALL / RET com pilha simples
+Impacto: fatorial (sub-rotina de multiplicação)
+Sem CALL/RET, você precisa replicar o código de multiplicação inline para cada uso. Bastariam 2 novas instruções:
+
+CALL addr — salva PC em H (ou posição fixa de memória), salta
+RET — restaura PC de H
+
+Com isso, a sub-rotina de multiplicação é escrita uma vez e o fatorial a chama em loop.
+
+4. IF Y < 0 e IF Y <= 0 — branches simétricos para Y
+Impacto: fibonacci, maior que
+Atualmente só X tem IF X < 0 (18) e IF X <= 0 (43). Y só tem IF Y == 0 (35). Para Fibonacci, o contador de loop costuma ficar em Y enquanto X/Y acumulam a sequência — forçando trocas caras (SWAP, Y=X) só para fazer o branch.
+
+5. X = X AND Y / X = X OR Y — operações lógicas entre registradores (1 ciclo)
+Impacto: multiplicação (teste de bit mais limpo)
+A ALU já suporta AND/OR, mas não há opcode de macroinstrução para X = X AND Y. Com Y=1 carregado, X AND Y isolaria o LSB em 1 ciclo, substituindo o IF X_ODD ou tornando-o desnecessário.
+
+6. Y = Y - X / Y = X - Y — subtração direta entre registradores (1 ciclo)
+Impacto: maior que, fibonacci
+Só existe X = X - Y (46). Para "maior que", às vezes precisa de Y - X e acaba fazendo SWAP (3 microciclos) + subtração.
+
+Prioridade sugerida
+1. IF X_ODD          ← desbloqueador da multiplicação eficiente
+2. Imediatos (MBR)   ← reduz 3→1 ciclo em cargas de constante
+3. CALL/RET          ← fatorial sem código duplicado
+4. Branches para Y   ← economiza SWAPs em Fibonacci
+5. AND/OR reg-reg    ← complementa item 1
+6. Y = Y - X         ← menor ganho, mas elimina SWAPs pontuais
+A combinação de IF X_ODD + shift-and-add reduz multiplicação de O(N) adições para O(log N) iterações com apenas ~5–6 instruções por bit — impacto direto em fatorial e indiretamente em todos os outros.
