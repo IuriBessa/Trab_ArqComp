@@ -1,482 +1,392 @@
-# processador.py  (UFC2X — revisão com 5 optimizações)
-# Dependência: memoria.py (inalterado)
-import memoria
+# ufc2x.py
+# chama o arquivo de memoria para que seja possivel a leitura
+import memory 
 from array import array
 
-# ==============================================================================
-# LAYOUT DO MIR — 38 bits (cabe em uint64):
-#
-#  [37]     SAVE_FLAGS (1b)   — 0 = ALU opera mas NÃO atualiza N/Z
-#  [36:28]  NEXT_ADDR  (9b)
-#  [27:25]  JAM        (3b)
-#  [24:17]  ALU        (8b)  — bits[7:6]=shift, bits[5:0]=operação
-#  [16:9]   WRITE_REGS (8b)  — expandido de 6→8 bits (Z1, Z2)
-#  [8:6]    MEM        (3b)
-#  [5:3]    BUS_A      (3b)
-#  [2:0]    BUS_B      (3b)
-#
-# BUS_A (bits[5:3]): 000=H  001=MDR  010=PC  011=MBR  100=X  101=Y  110=Z1  111=Z2
-# BUS_B (bits[2:0]): 000=MDR 001=PC  010=MBR 011=X    100=Y  101=Z1 110=Z2  111=0
-#
-# WRITE_REGS (bits[16:9]):
-#   bit7=MAR  bit6=MDR  bit5=PC  bit4=X  bit3=Y  bit2=H  bit1=Z1  bit0=Z2
-#
-# JAM:  000=NOP  001=JAMZ(se Z=1)  010=JAMN(se N=1)  011=JAMNZ(se N|Z=1)
-#       100=JAMBR(→MBR)  101=JAMNOTZ(se Z=0)  110=JAMNOTN(se N=0)
-#
-# ALU (bits[5:0] após remover shift):
-#   011000=A   010100=B   011010=~A  101100=~B
-#   111100=A+B 111101=A+B+1  111001=A+1  110101=B+1
-#   111111=B-A 110110=B-1    111011=-A
-#   001100=A&B 011100=A|B    010000=0    110001=1  110010=-1
-#   000001=A&1 (NOVO)  000010=A^B (NOVO)  000011=|A| (NOVO)
-# ==============================================================================
 
-# ── Seletores BUS_A ──────────────────────────────────────────────────────────
-BA_H   = 0b000
-BA_MDR = 0b001
-BA_PC  = 0b010
-BA_MBR = 0b011
-BA_X   = 0b100
-BA_Y   = 0b101
-BA_Z1  = 0b110
-BA_Z2  = 0b111
+MPC = 0 #diz qual instrução i está sendo executada agora como firmware[i].
+MIR = 0 #recebe o conteudo que a microinstrução apontou e guarda p levar p ula
+ 
+#MDR é linkado com MAR e MBR comm PC
+MAR = 0 #endereço i que se quer escrever ou ler algo na memoria
+MDR = 0 #depois de ler o valor esperado vem pra cá, ou se coloca aqui o valor antes de escrever trabalha com words
+PC = 0 #guarda o ENDEREÇO de onde foram escritas as instruções a serem feitas
+MBR = 0 #Usado para ler as macroinstruçoes(so trabalha com bytes) 
+X = 0 #Registrador principal para cálculos, onde os resultados ficam
+Y = 0 #segundo acumulador, espelho de X para operações que precisam de dois valores simultaneos
+H = 0 #registrador temporario, "rascunho p contas c 2 valores"
+Z1 = 0
+Z2 = 0
 
-# ── Seletores BUS_B ──────────────────────────────────────────────────────────
-BB_MDR = 0b000
-BB_PC  = 0b001
-BB_MBR = 0b010
-BB_X   = 0b011
-BB_Y   = 0b100
-BB_Z1  = 0b101
-BB_Z2  = 0b110
-BB_0   = 0b111
-
-# ── Bits WRITE_REGS ──────────────────────────────────────────────────────────
-WR_MAR = 0b10000000
-WR_MDR = 0b01000000
-WR_PC  = 0b00100000
-WR_X   = 0b00010000
-WR_Y   = 0b00001000
-WR_H   = 0b00000100
-WR_Z1  = 0b00000010  # NOVO
-WR_Z2  = 0b00000001  # NOVO
-
-# ── Bits MEM ─────────────────────────────────────────────────────────────────
-MEM_FETCH = 0b001
-MEM_READ  = 0b010
-MEM_WRITE = 0b100
-
-# ── Códigos JAM ──────────────────────────────────────────────────────────────
-JAM_NONE  = 0b000
-JAM_Z     = 0b001   # pula se Z=1
-JAM_N     = 0b010   # pula se N=1
-JAM_NZ    = 0b011   # pula se N=1 ou Z=1
-JAM_MBR   = 0b100   # despacha para MBR (fetch/goto)
-JAM_NOTZ  = 0b101   # pula se Z=0  (NOVO — "se resultado ≠ 0")
-JAM_NOTN  = 0b110   # pula se N=0  (NOVO)
-
-# ── Operações ALU (campo de 8 bits) ──────────────────────────────────────────
-ALU_A       = 0b00011000
-ALU_B       = 0b00010100
-ALU_NOT_A   = 0b00011010
-ALU_NOT_B   = 0b00101100
-ALU_A_B     = 0b00111100   # A+B
-ALU_A_B_1   = 0b00111101   # A+B+1
-ALU_A_1     = 0b00111001   # A+1
-ALU_B_1     = 0b00110101   # B+1
-ALU_B_A     = 0b00111111   # B-A
-ALU_B_1M    = 0b00110110   # B-1
-ALU_NEG_A   = 0b00111011   # -A
-ALU_AND     = 0b00001100   # A&B
-ALU_OR      = 0b00011100   # A|B
-ALU_ZERO    = 0b00010000   # 0
-ALU_ONE     = 0b00110001   # 1
-ALU_NEG1    = 0b00110010   # -1
-ALU_SHL_B   = 0b01010100   # B<<1
-ALU_SHR_B   = 0b10010100   # B>>1
-# ── Novas operações (bits[5:0] livres) ───────────────────────────────────────
-ALU_A_AND_1 = 0b00000001   # A & 1  → testa bit 0 (NOVO)
-ALU_XOR     = 0b00000010   # A ^ B            (NOVO)
-ALU_ABS_A   = 0b00000011   # |A|              (NOVO)
-
-# ==============================================================================
-# Helper: constrói uma microinstrução de 38 bits
-# ==============================================================================
-def make_micro(next_addr=0, jam=JAM_NONE, alu=ALU_B,
-               write_regs=0, mem=0, bus_a=BA_H, bus_b=BB_MDR,
-               save_flags=1):
-    return (
-        ((save_flags  &      1) << 37) |
-        ((next_addr   & 0x1FF) << 28) |
-        ((jam         &  0b111) << 25) |
-        ((alu         &   0xFF) << 17) |
-        ((write_regs  &   0xFF) <<  9) |
-        ((mem         &  0b111) <<  6) |
-        ((bus_a       &  0b111) <<  3) |
-         (bus_b       &  0b111)
-    )
-
-# ==============================================================================
-# Registradores
-# ==============================================================================
-MPC = 0
-MIR = 0
-MAR = 0
-MDR = 0
-PC  = 0
-MBR = 0
-X   = 0
-Y   = 0
-H   = 0
-Z1  = 0   # NOVO — registrador de propósito geral 1
-Z2  = 0   # NOVO — registrador de propósito geral 2
-
-N = 0
+N = 0  #indicadores de estado
 Z = 1
 
-BUS_A = 0
-BUS_B = 0
-BUS_C = 0
+BUS_A = 0 #entrada A da ALU, selecionada pelos bits 5..3 do MIR
+BUS_B = 0 #entrada B da ALU, selecionada pelos bits 2..0 do MIR
+BUS_C = 0 #carrega o resultado que vai p os registradores
+
+firmware = array('Q',[0]) * 512  #cria um espaço que guarda as microinstruções (64 bits, usa 35)
 
 # ==============================================================================
-# Firmware  (512 entradas × 64 bits)
-# ==============================================================================
-firmware = array('Q', [0]) * 512
-
-# ── 0: FETCH/INIT — PC=PC+1; MBR=mem[PC]; GOTO MBR ─────────────────────────
-firmware[0] = make_micro(0, JAM_MBR, ALU_B_1, WR_PC, MEM_FETCH, BA_PC, BB_PC)
-
-# ── 2: X = X + mem[addr]  (3 ciclos) ────────────────────────────────────────
-firmware[2] = make_micro(3,   JAM_NONE, ALU_B_1, WR_PC,  MEM_FETCH, BA_PC,  BB_PC,  save_flags=0)
-firmware[3] = make_micro(4,   JAM_NONE, ALU_B,   WR_MAR, MEM_READ,  BA_H,   BB_MBR, save_flags=0)
-firmware[4] = make_micro(0,   JAM_NONE, ALU_A_B, WR_X,   0,         BA_MDR, BB_X)
-
-# ── 6: mem[addr] = X  (3 ciclos) ────────────────────────────────────────────
-firmware[6] = make_micro(7,   JAM_NONE, ALU_B_1, WR_PC,  MEM_FETCH, BA_PC,  BB_PC,  save_flags=0)
-firmware[7] = make_micro(8,   JAM_NONE, ALU_B,   WR_MAR, 0,         BA_H,   BB_MBR, save_flags=0)
-firmware[8] = make_micro(0,   JAM_NONE, ALU_B,   WR_MDR, MEM_WRITE, BA_H,   BB_X,   save_flags=0)
-
-# ── 9: GOTO addr  (2 ciclos) ────────────────────────────────────────────────
-firmware[9]  = make_micro(10,  JAM_NONE, ALU_B_1, WR_PC,  MEM_FETCH, BA_PC,  BB_PC,  save_flags=0)
-firmware[10] = make_micro(0,   JAM_MBR,  ALU_B,   WR_PC,  MEM_FETCH, BA_H,   BB_MBR, save_flags=0)
-
-# ── 11: IF X == 0 GOTO addr ─────────────────────────────────────────────────
-# Z=1 → GOTO 268; Z=0 → descarta byte (12)
-firmware[11]  = make_micro(12,  JAM_Z,    ALU_B,   0,      0,         BA_H,   BB_X)
-firmware[12]  = make_micro(0,   JAM_NONE, ALU_B_1, WR_PC,  0,         BA_PC,  BB_PC,  save_flags=0)
-firmware[268] = make_micro(9,   JAM_NONE, ALU_B,   0,      0,         BA_H,   BB_MDR, save_flags=0)
-
-# ── 13: X = X - mem[addr]  (3 ciclos) ───────────────────────────────────────
-firmware[13] = make_micro(14,  JAM_NONE, ALU_B_1, WR_PC,  MEM_FETCH, BA_PC,  BB_PC,  save_flags=0)
-firmware[14] = make_micro(15,  JAM_NONE, ALU_B,   WR_MAR, MEM_READ,  BA_H,   BB_MBR, save_flags=0)
-firmware[15] = make_micro(0,   JAM_NONE, ALU_B_A, WR_X,   0,         BA_MDR, BB_X)
-
-# ── 16: X = X + 1 ───────────────────────────────────────────────────────────
-firmware[16] = make_micro(0, JAM_NONE, ALU_B_1,  WR_X, 0, BA_H, BB_X)
-
-# ── 17: X = X - 1 ───────────────────────────────────────────────────────────
-firmware[17] = make_micro(0, JAM_NONE, ALU_B_1M, WR_X, 0, BA_H, BB_X)
-
-# ── 18: IF X < 0 GOTO addr ──────────────────────────────────────────────────
-# N=1 → GOTO 275; N=0 → descarta byte (19)
-firmware[18]  = make_micro(19,  JAM_N,    ALU_B,   0,     0,  BA_H, BB_X)
-firmware[19]  = make_micro(0,   JAM_NONE, ALU_B_1, WR_PC, 0,  BA_PC, BB_PC, save_flags=0)
-firmware[275] = make_micro(9,   JAM_NONE, ALU_B,   0,     0,  BA_H,  BB_MDR, save_flags=0)
-
-# ── 20: Y = X ───────────────────────────────────────────────────────────────
-firmware[20] = make_micro(0, JAM_NONE, ALU_B, WR_Y, 0, BA_H, BB_X)
-
-# ── 21: X = Y ───────────────────────────────────────────────────────────────
-firmware[21] = make_micro(0, JAM_NONE, ALU_B, WR_X, 0, BA_H, BB_Y)
-
-# ── 22: mem[addr] = Y  (3 ciclos) ───────────────────────────────────────────
-firmware[22] = make_micro(23,  JAM_NONE, ALU_B_1, WR_PC,  MEM_FETCH, BA_PC, BB_PC,  save_flags=0)
-firmware[23] = make_micro(24,  JAM_NONE, ALU_B,   WR_MAR, 0,         BA_H,  BB_MBR, save_flags=0)
-firmware[24] = make_micro(0,   JAM_NONE, ALU_B,   WR_MDR, MEM_WRITE, BA_H,  BB_Y,   save_flags=0)
-
-# ── 25: Y = Y + mem[addr]  (3 ciclos) ───────────────────────────────────────
-firmware[25] = make_micro(26,  JAM_NONE, ALU_B_1, WR_PC,  MEM_FETCH, BA_PC,  BB_PC,  save_flags=0)
-firmware[26] = make_micro(27,  JAM_NONE, ALU_B,   WR_MAR, MEM_READ,  BA_H,   BB_MBR, save_flags=0)
-firmware[27] = make_micro(0,   JAM_NONE, ALU_A_B, WR_Y,   0,         BA_MDR, BB_Y)
-
-# ── 28: Y = mem[addr]  (3 ciclos) ───────────────────────────────────────────
-firmware[28] = make_micro(29,  JAM_NONE, ALU_B_1, WR_PC,  MEM_FETCH, BA_PC, BB_PC,  save_flags=0)
-firmware[29] = make_micro(30,  JAM_NONE, ALU_B,   WR_MAR, MEM_READ,  BA_H,  BB_MBR, save_flags=0)
-firmware[30] = make_micro(0,   JAM_NONE, ALU_B,   WR_Y,   0,         BA_H,  BB_MDR)
-
-# ── 31: X = X << 1 ──────────────────────────────────────────────────────────
-firmware[31] = make_micro(0, JAM_NONE, ALU_SHL_B, WR_X, 0, BA_H, BB_X)
-
-# ── 32: X = X >> 1 ──────────────────────────────────────────────────────────
-firmware[32] = make_micro(0, JAM_NONE, ALU_SHR_B, WR_X, 0, BA_H, BB_X)
-
-# ── 33: Y = Y + 1 ───────────────────────────────────────────────────────────
-firmware[33] = make_micro(0, JAM_NONE, ALU_B_1,  WR_Y, 0, BA_H, BB_Y)
-
-# ── 34: Y = Y - 1 ───────────────────────────────────────────────────────────
-firmware[34] = make_micro(0, JAM_NONE, ALU_B_1M, WR_Y, 0, BA_H, BB_Y)
-
-# ── 35: IF Y == 0 GOTO addr ─────────────────────────────────────────────────
-# Z=1 → GOTO 292; Z=0 → descarta byte (36)
-firmware[35]  = make_micro(36,  JAM_Z,    ALU_B,   0,     0,  BA_H,  BB_Y)
-firmware[36]  = make_micro(0,   JAM_NONE, ALU_B_1, WR_PC, 0,  BA_PC, BB_PC, save_flags=0)
-firmware[292] = make_micro(9,   JAM_NONE, ALU_B,   0,     0,  BA_H,  BB_MDR, save_flags=0)
-
-# ── 40: X = mem[addr]  (via 128-129) ────────────────────────────────────────
-firmware[40]  = make_micro(128, JAM_NONE, ALU_B_1, WR_PC,  MEM_FETCH, BA_PC, BB_PC,  save_flags=0)
-firmware[128] = make_micro(129, JAM_NONE, ALU_B,   WR_MAR, MEM_READ,  BA_H,  BB_MBR, save_flags=0)
-firmware[129] = make_micro(0,   JAM_NONE, ALU_B,   WR_X,   0,         BA_H,  BB_MDR)
-
-# ── 41: X = 0 ───────────────────────────────────────────────────────────────
-firmware[41] = make_micro(0, JAM_NONE, ALU_ZERO, WR_X, 0)
-
-# ── 42: Y = 0 ───────────────────────────────────────────────────────────────
-firmware[42] = make_micro(0, JAM_NONE, ALU_ZERO, WR_Y, 0)
-
-# ── 43: IF X <= 0 GOTO addr ─────────────────────────────────────────────────
-# N|Z=1 → GOTO 388; outro → descarta byte (132)
-firmware[43]  = make_micro(132, JAM_NZ,   ALU_B,   0,     0,  BA_H,  BB_X)
-firmware[132] = make_micro(0,   JAM_NONE, ALU_B_1, WR_PC, 0,  BA_PC, BB_PC, save_flags=0)
-firmware[388] = make_micro(9,   JAM_NONE, ALU_B,   0,     0,  BA_H,  BB_MDR, save_flags=0)
-
-# ── 45: X = X + Y ───────────────────────────────────────────────────────────
-firmware[45] = make_micro(0, JAM_NONE, ALU_A_B, WR_X, 0, BA_Y, BB_X)
-
-# ── 46: X = X - Y  (B-A = X-Y) ──────────────────────────────────────────────
-firmware[46] = make_micro(0, JAM_NONE, ALU_B_A, WR_X, 0, BA_Y, BB_X)
-
-# ── 47: Y = X + Y ───────────────────────────────────────────────────────────
-firmware[47] = make_micro(0, JAM_NONE, ALU_A_B, WR_Y, 0, BA_Y, BB_X)
-
-# ── 48: SWAP X, Y  (3 microciclos internos) ─────────────────────────────────
-firmware[48]  = make_micro(130, JAM_NONE, ALU_B, WR_H, 0, BA_H, BB_X,  save_flags=0)  # H=X
-firmware[130] = make_micro(131, JAM_NONE, ALU_B, WR_X, 0, BA_H, BB_Y,  save_flags=0)  # X=Y
-firmware[131] = make_micro(0,   JAM_NONE, ALU_A, WR_Y, 0, BA_H, BB_MDR)               # Y=H
-
-# ── 49: Y = Y << 1 ──────────────────────────────────────────────────────────
-firmware[49] = make_micro(0, JAM_NONE, ALU_SHL_B, WR_Y, 0, BA_H, BB_Y)
-
-# ── 50: Y = Y >> 1 ──────────────────────────────────────────────────────────
-firmware[50] = make_micro(0, JAM_NONE, ALU_SHR_B, WR_Y, 0, BA_H, BB_Y)
-
-# ── 255: HALT ────────────────────────────────────────────────────────────────
-firmware[255] = 0
-
-# ==============================================================================
-# NOVAS INSTRUÇÕES
+# LAYOUT DO MIR (35 bits):
+# 0_000000000_000_00000000_00000000_000_000_000
+# [37] SAVE_FLAGS (1b) [36:28] NEXT_ADDR (9b) | [27:25] JAM (3b) | [24:17] ALU (8b) [16:9] WRITE_REGS (8b) | [8:6] MEM (3b) | [5:3] BUS_A (3b) | [2:0] BUS_B (3b)
+#
+# BUS_A seletores (bits 5..3): 000=H  001=MDR 010=PC 011=MBR 100=X 101=Y 110=Z1 111=Z2
+# BUS_B seletores (bits 2..0): 000=MDR 001=PC 010=MBR 011=X 100=Y 101=Z1 110=Z2 111=0
 # ==============================================================================
 
-# ── 53: H = X  (save_flags=0 → preserva N/Z do teste anterior) ──────────────
-firmware[53] = make_micro(0, JAM_NONE, ALU_B, WR_H, 0, BA_H, BB_X, save_flags=0)
+# 0: INIT/FETCH — BUS_C = PC+1; PC=BUS_C; FETCH; GOTO MBR
+# BUS_A=PC(010), BUS_B=PC(001), ALU=B+1(00110101), WRITE=PC(001000), MEM=FETCH(001), JAM=MBR(100)
+firmware[0] = 0b1_000000000_100_00110101_00100000_001_010_001
 
-# ── 54: X = H ────────────────────────────────────────────────────────────────
-firmware[54] = make_micro(0, JAM_NONE, ALU_A, WR_X, 0, BA_H, BB_MDR)
+# 2: X = X + mem[address] — 3 ciclos
+# Ciclo 2: PC=PC+1; FETCH; GOTO 3
+firmware[2] = 0b0_000000011_000_00110101_00100000_001_010_001
+# Ciclo 3: MAR=MBR; READ; GOTO 4 — BUS_B=MBR(010), ALU=B(00010100), WRITE=MAR(100000), MEM=READ(010)
+firmware[3] = 0b0_000000100_000_00010100_10000000_010_000_010
+# Ciclo 4: X = MDR + X; GOTO 0 — BUS_A=MDR(001), BUS_B=X(011), ALU=A+B(00111100), WRITE=X(000100)
+firmware[4] = 0b1_000000000_000_00111100_00010000_000_001_011
 
-# ── 55: H = Y  (save_flags=0) ────────────────────────────────────────────────
-firmware[55] = make_micro(0, JAM_NONE, ALU_B, WR_H, 0, BA_H, BB_Y, save_flags=0)
+# 6: memory[address] = X — 3 ciclos
+# Ciclo 6: PC=PC+1; FETCH; GOTO 7
+firmware[6] = 0b0_000000111_000_00110101_00100000_001_010_001
+# Ciclo 7: MAR=MBR; GOTO 8
+firmware[7] = 0b0_000001000_000_00010100_10000000_000_000_010
+# Ciclo 8: MDR=X; WRITE_WORD; GOTO 0
+firmware[8] = 0b0_000000000_000_00010100_01000000_100_000_011
 
-# ── 56: Y = H ────────────────────────────────────────────────────────────────
-firmware[56] = make_micro(0, JAM_NONE, ALU_A, WR_Y, 0, BA_H, BB_MDR)
+# 9: GOTO address — 2 ciclos
+# Ciclo 9: PC=PC+1; FETCH; GOTO 10
+firmware[9] = 0b0_000001010_000_00110101_00100000_001_010_001
+# Ciclo 10: PC=MBR; FETCH; GOTO MBR
+firmware[10] = 0b0_000000000_100_00010100_00100000_001_000_010
 
-# ── 57: IF Y <= 0 GOTO addr ─────────────────────────────────────────────────
-# N|Z=1 → GOTO 314; N|Z=0 → descarta byte (58)
-firmware[57]  = make_micro(58,  JAM_NZ,   ALU_B,   0,     0,  BA_H,  BB_Y)
-firmware[58]  = make_micro(0,   JAM_NONE, ALU_B_1, WR_PC, 0,  BA_PC, BB_PC, save_flags=0)
-firmware[314] = make_micro(9,   JAM_NONE, ALU_B,   0,     0,  BA_H,  BB_MDR, save_flags=0)
+# 11: IF X == 0 GOTO address
+# Ciclo 11: BUS_C=X; se Z=1 GOTO 268, senão GOTO 12
+firmware[11] = 0b1_000001100_001_00010100_00000000_000_000_011
+# Ciclo 12 (Z=0): PC=PC+1; GOTO 0 (descarta byte de endereço)
+firmware[12] = 0b0_000000000_000_00110101_00100000_000_010_001
+# Ciclo 268 (Z=1): GOTO 9 — CORRIGIDO: ALU=B explícita
+firmware[268] = 0b0_000001001_000_00010100_00000000_000_000_000
 
-# ── 59: IF Y < 0 GOTO addr ──────────────────────────────────────────────────
-# N=1 → GOTO 316; N=0 → descarta byte (60)
-firmware[59]  = make_micro(60,  JAM_N,    ALU_B,   0,     0,  BA_H,  BB_Y)
-firmware[60]  = make_micro(0,   JAM_NONE, ALU_B_1, WR_PC, 0,  BA_PC, BB_PC, save_flags=0)
-firmware[316] = make_micro(9,   JAM_NONE, ALU_B,   0,     0,  BA_H,  BB_MDR, save_flags=0)
+# 13: X = X - mem[address] — 3 ciclos
+# Ciclo 13: PC=PC+1; FETCH; GOTO 14
+firmware[13] = 0b0_000001110_000_00110101_00100000_001_010_001
+# Ciclo 14: MAR=MBR; READ; GOTO 15
+firmware[14] = 0b0_000001111_000_00010100_10000000_010_000_010
+# Ciclo 15: X = X - MDR (B-A = X-MDR); GOTO 0
+# BUS_A=MDR(001), BUS_B=X(011), ALU=B-A(00111111), WRITE=X(000100)
+firmware[15] = 0b1_000000000_000_00111111_00010000_000_001_011
 
-# ── 61: Y = Y - mem[addr]  (3 ciclos) ───────────────────────────────────────
-firmware[61]  = make_micro(133, JAM_NONE, ALU_B_1, WR_PC,  MEM_FETCH, BA_PC,  BB_PC,  save_flags=0)
-firmware[133] = make_micro(134, JAM_NONE, ALU_B,   WR_MAR, MEM_READ,  BA_H,   BB_MBR, save_flags=0)
-firmware[134] = make_micro(0,   JAM_NONE, ALU_B_A, WR_Y,   0,         BA_MDR, BB_Y)
+# 16: X = X + 1 — 1 ciclo
+# BUS_B=X(011), ALU=B+1(00110101), WRITE=X(000100)
+firmware[16] = 0b1_000000000_000_00110101_00010000_000_000_011
 
-# ── 64: X = X AND Y ──────────────────────────────────────────────────────────
-firmware[64] = make_micro(0, JAM_NONE, ALU_AND, WR_X, 0, BA_Y, BB_X)
+# 17: X = X - 1 — 1 ciclo
+# BUS_B=X(011), ALU=B-1(00110110), WRITE=X(000100)
+firmware[17] = 0b1_000000000_000_00110110_00010000_000_000_011
 
-# ── 65: X = X OR Y ───────────────────────────────────────────────────────────
-firmware[65] = make_micro(0, JAM_NONE, ALU_OR,  WR_X, 0, BA_Y, BB_X)
+# 18: IF X < 0 GOTO address — 2 ou 3 ciclos
+# Ciclo 18: BUS_C=X; se N=1 GOTO 274 (=18|256), senão GOTO 19
+firmware[18] =  0b1_000010011_010_00010100_00000000_000_000_011
+# Ciclo 19 (N=0): PC=PC+1; GOTO 0 (descarta byte de endereço)
+firmware[19] =  0b0_000000000_000_00110101_00100000_000_010_001
+# Ciclo 275 (N=1): GOTO 9 (executa o desvio)
+firmware[275] = 0b0_000001001_000_00010100_00000000_000_000_000
 
-# ── 66: X = imm  (2 ciclos — 1 ciclo a menos que X=mem[addr]) ───────────────
-# Ciclo 66: PC++; FETCH → MBR recebe o byte imediato
-# Ciclo 135: X = MBR
-firmware[66]  = make_micro(135, JAM_NONE, ALU_B_1, WR_PC, MEM_FETCH, BA_PC, BB_PC,  save_flags=0)
-firmware[135] = make_micro(0,   JAM_NONE, ALU_B,   WR_X,  0,         BA_H,  BB_MBR)
+# 20: Y = X — 1 ciclo
+# BUS_B=X(011), ALU=B(00010100), WRITE=Y(000010)
+firmware[20] = 0b1_000000000_000_00010100_00001000_000_000_011
 
-# ── 67: Y = imm  (2 ciclos) ──────────────────────────────────────────────────
-firmware[67]  = make_micro(136, JAM_NONE, ALU_B_1, WR_PC, MEM_FETCH, BA_PC, BB_PC,  save_flags=0)
-firmware[136] = make_micro(0,   JAM_NONE, ALU_B,   WR_Y,  0,         BA_H,  BB_MBR)
+# 21: X = Y — 1 ciclo
+# BUS_B=Y(100), ALU=B(00010100), WRITE=X(000100)
+firmware[21] = 0b1_000000000_000_00010100_00010000_000_000_100
 
-# ── 68-75: Registradores Z1 e Z2 ─────────────────────────────────────────────
-firmware[68] = make_micro(0, JAM_NONE, ALU_B, WR_Z1, 0, BA_H, BB_X,  save_flags=0)  # Z1 = X
-firmware[69] = make_micro(0, JAM_NONE, ALU_B, WR_Z1, 0, BA_H, BB_Y,  save_flags=0)  # Z1 = Y
-firmware[70] = make_micro(0, JAM_NONE, ALU_B, WR_X,  0, BA_H, BB_Z1)                # X  = Z1
-firmware[71] = make_micro(0, JAM_NONE, ALU_B, WR_Y,  0, BA_H, BB_Z1)                # Y  = Z1
-firmware[72] = make_micro(0, JAM_NONE, ALU_B, WR_Z2, 0, BA_H, BB_X,  save_flags=0)  # Z2 = X
-firmware[73] = make_micro(0, JAM_NONE, ALU_B, WR_Z2, 0, BA_H, BB_Y,  save_flags=0)  # Z2 = Y
-firmware[74] = make_micro(0, JAM_NONE, ALU_B, WR_X,  0, BA_H, BB_Z2)                # X  = Z2
-firmware[75] = make_micro(0, JAM_NONE, ALU_B, WR_Y,  0, BA_H, BB_Z2)                # Y  = Z2
+# 22: mem[address] = Y — 3 ciclos
+# Ciclo 22: PC=PC+1; FETCH; GOTO 23
+firmware[22] = 0b0_000010111_000_00110101_00100000_001_010_001
+# Ciclo 23: MAR=MBR; GOTO 24
+firmware[23] = 0b0_000011000_000_00010100_10000000_000_000_010
+# Ciclo 24: MDR=Y; WRITE_WORD; GOTO 0
+firmware[24] = 0b0_000000000_000_00010100_01000000_100_000_100
 
-# ── 76: IF X_ODD GOTO addr  (JAM_NOTZ: pula quando Z=0, i.e. X&1 ≠ 0) ──────
-# X ímpar → Z=0 → 77|256=333 → GOTO 9
-# X par   → Z=1 → 77           → descarta byte
-firmware[76]  = make_micro(77,  JAM_NOTZ, ALU_A_AND_1, 0,     0,  BA_X,  BB_MDR)
-firmware[77]  = make_micro(0,   JAM_NONE, ALU_B_1,     WR_PC, 0,  BA_PC, BB_PC,  save_flags=0)
-firmware[333] = make_micro(9,   JAM_NONE, ALU_B,       0,     0,  BA_H,  BB_MDR, save_flags=0)
+# 25: Y = Y + mem[address] — 3 ciclos
+# Ciclo 25: PC=PC+1; FETCH; GOTO 26
+firmware[25] = 0b0_000011010_000_00110101_00100000_001_010_001
+# Ciclo 26: MAR=MBR; READ; GOTO 27
+firmware[26] = 0b0_000011011_000_00010100_10000000_010_000_010
+# Ciclo 27: Y = MDR + Y; GOTO 0 — BUS_A=MDR(001), BUS_B=Y(100), ALU=A+B(00111100), WRITE=Y(000010)
+firmware[27] = 0b1_000000000_000_00111100_00001000_000_001_100
 
-# ── 78: Y = Y - X  (B-A = Y-X) ───────────────────────────────────────────────
-firmware[78] = make_micro(0, JAM_NONE, ALU_B_A, WR_Y, 0, BA_X, BB_Y)
+# 28: Y = mem[address] — 3 ciclos
+# Ciclo 28: PC=PC+1; FETCH; GOTO 29
+firmware[28] = 0b0_000011101_000_00110101_00100000_001_010_001
+# Ciclo 29: MAR=MBR; READ; GOTO 30
+firmware[29] = 0b0_000011110_000_00010100_10000000_010_000_010
+# Ciclo 30: Y=MDR; GOTO 0 — BUS_B=MDR(000), ALU=B(00010100), WRITE=Y(000010)
+firmware[30] = 0b1_000000000_000_00010100_00001000_000_000_000
 
-# ── 79: X = X XOR Y ───────────────────────────────────────────────────────────
-firmware[79] = make_micro(0, JAM_NONE, ALU_XOR,   WR_X, 0, BA_Y, BB_X)
+# 31: X = X << 1 (X * 2) — 1 ciclo
+# BUS_B=X(011), ALU=shift<<1+B(01_010100), WRITE=X(000100)
+firmware[31] = 0b1_000000000_000_01010100_00010000_000_000_011
 
-# ── 80: X = |X|   (valor absoluto) ──────────────────────────────────────────
-firmware[80] = make_micro(0, JAM_NONE, ALU_ABS_A, WR_X, 0, BA_X, BB_MDR)
+# 32: X = X >> 1 (X / 2) — 1 ciclo
+# BUS_B=X(011), ALU=shift>>1+B(10_010100), WRITE=X(000100)
+firmware[32] = 0b1_000000000_000_10010100_00010000_000_000_011
 
-# ==============================================================================
-# Funções do núcleo
-# ==============================================================================
+# 33: Y = Y + 1 — 1 ciclo
+# BUS_B=Y(100), ALU=B+1(00110101), WRITE=Y(000010)
+firmware[33] = 0b1_000000000_000_00110101_00001000_000_000_100
+
+# 34: Y = Y - 1 — 1 ciclo
+# BUS_B=Y(100), ALU=B-1(00110110), WRITE=Y(000010)
+firmware[34] = 0b1_000000000_000_00110110_00001000_000_000_100
+
+# 35: IF Y == 0 GOTO address — 2 ou 3 ciclos
+# Ciclo 35: testa Y; se Z=1 GOTO 291 (=35|256), senão GOTO 36
+firmware[35]  = 0b1_000100100_001_00010100_00000000_000_000_100
+# Ciclo 36 (Z=0): PC=PC+1; GOTO 0 (descarta byte de endereço)
+firmware[36]  = 0b0_000000000_000_00110101_00100000_000_010_001
+# Ciclo 292 (Z=1): GOTO 9
+firmware[292] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+# 40: X = mem[addr] — 3 ciclos
+# Ciclo 40: PC=PC+1; FETCH; GOTO 128
+firmware[40]  = 0b0_010000000_000_00110101_00100000_001_010_001
+# Ciclo 128: MAR=MBR + READ (fundidos); GOTO 129
+firmware[128] = 0b0_010000001_000_00010100_10000000_010_000_010
+# Ciclo 129: X=MDR; GOTO 0
+firmware[129] = 0b1_000000000_000_00010100_00010000_000_000_000
+
+# 41: X = 0 — 1 ciclo
+# ALU=0(00010000), WRITE=X(000100)
+firmware[41] = 0b1_000000000_000_00010000_00010000_000_000_000
+
+# 42: Y = 0 — 1 ciclo
+# ALU=0(00010000), WRITE=Y(000010)
+firmware[42] = 0b1_000000000_000_00010000_00001000_000_000_000
+
+# 43: IF X <= 0 GOTO address — 2 ou 3 ciclos
+# JAM=011 (N|Z): desvia se X<0 OU X==0
+# Ciclo 43: testa X; se N|Z GOTO 299 (=43|256), senão GOTO 132
+firmware[43]  = 0b1_010000100_011_00010100_00000000_000_000_011
+# Ciclo 132 (X>0): PC=PC+1; GOTO 0 (descarta byte de endereço)
+firmware[132] = 0b0_000000000_000_00110101_00100000_000_010_001
+# Ciclo 388 (X<=0): GOTO 9
+firmware[388] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+# 45: X = X + Y — 1 ciclo
+# BUS_A=X(100), BUS_B=Y(100)... conflito de seletor B!
+# BUS_B não tem X e Y ao mesmo tempo. Usar A=Y, B=X (A+B comutativo)
+# BUS_A=Y(101), BUS_B=X(011), ALU=A+B(00111100), WRITE=X(000100)
+firmware[45] = 0b1_000000000_000_00111100_00010000_000_101_011
+
+# 46: X = X - Y — 1 ciclo
+# B-A = X-Y: BUS_A=Y(101), BUS_B=X(011), ALU=B-A(00111111), WRITE=X(000100)
+firmware[46] = 0b1_000000000_000_00111111_00010000_000_101_011
+
+# 47: Y = X + Y — 1 ciclo
+# BUS_A=Y(101), BUS_B=X(011), ALU=A+B(00111100), WRITE=Y(000010)
+firmware[47] = 0b1_000000000_000_00111100_00001000_000_101_011
+
+# 48: SWAP X, Y — 1 opcode, 3 microciclos internos
+# microciclo 48: H = X; GOTO 130
+firmware[48]  = 0b0_010000010_000_00010100_00000100_000_000_011
+# microciclo 130: X = Y; GOTO 131
+firmware[130] = 0b0_010000011_000_00010100_00010000_000_000_100
+# microciclo 131: Y = H (ALU=A, A=H); GOTO 0
+firmware[131] = 0b1_000000000_000_00011000_00001000_000_000_000
+
+# 49: Y = Y << 1 (Y * 2) — 1 ciclo
+# BUS_B=Y(100), ALU=shift<<1+B(01_010100), WRITE=Y(000010)
+firmware[49] = 0b1_000000000_000_01010100_00001000_000_000_100
+
+# 50: Y = Y >> 1 (Y / 2) — 1 ciclo
+# BUS_B=Y(100), ALU=shift>>1+B(10_010100), WRITE=Y(000010)
+firmware[50] = 0b1_000000000_000_10010100_00001000_000_000_100
+
+# 53: H = X - 1 ciclo 
+firmware[53] = 0b0_000000000_000_00010100_00000010_000_000_011
+
+# 54: X = H - 1 ciclo
+firmware[54] = 0b1_000000000_000_00011000_00010000_000_000_000
+
+# 55: H = Y - 1 ciclo
+firmware[55] = 0b0_000000000_000_00010100_00001000_000_000_100
+
+# 56: Y = H - 1 ciclo 
+firmware[56] = 0b1_000000000_000_00011000_00001000_000_000_000
+
+# 57: IF Y <= 0 GOTO addr - 3 ciclos
+firmware[57] = 0b1_000111010_011_00010100_00000000_000_000_100
+firmware[58] = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[314] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+# 59: IF Y < 0 GOTO addr - 3 ciclos
+firmware[59] = 0b1_000111100_010_00010100_00000000_000_000_100
+firmware[60] = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[316] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+# 255: HALT
+firmware[255] = 0b0_000000000_000_00000000_00000000_000_000_000
 
 def read_regs(reg_num):
-    global MDR, PC, MBR, X, Y, H, Z1, Z2, BUS_A, BUS_B
-
+    global MDR, PC, MBR, X, Y, H, BUS_A, BUS_B
+    
     reg_numB = reg_num & 0b111
     reg_numA = (reg_num >> 3) & 0b111
 
-    if   reg_numA == 0: BUS_A = H
-    elif reg_numA == 1: BUS_A = MDR
-    elif reg_numA == 2: BUS_A = PC
-    elif reg_numA == 3: BUS_A = MBR
-    elif reg_numA == 4: BUS_A = X
-    elif reg_numA == 5: BUS_A = Y
-    elif reg_numA == 6: BUS_A = Z1   # NOVO
-    elif reg_numA == 7: BUS_A = Z2   # NOVO
-
-    if   reg_numB == 0: BUS_B = MDR
-    elif reg_numB == 1: BUS_B = PC
-    elif reg_numB == 2: BUS_B = MBR
-    elif reg_numB == 3: BUS_B = X
-    elif reg_numB == 4: BUS_B = Y
-    elif reg_numB == 5: BUS_B = Z1   # NOVO
-    elif reg_numB == 6: BUS_B = Z2   # NOVO
-    else:               BUS_B = 0
-
+    if reg_numA == 0:
+       BUS_A = H
+    elif reg_numA == 1:
+       BUS_A = MDR
+    elif reg_numA == 2:
+       BUS_A = PC
+    elif reg_numA == 3:
+       BUS_A = MBR
+    elif reg_numA == 4:
+       BUS_A = X
+    elif reg_numA == 5:
+       BUS_A = Y
+    else:
+       BUS_A = 0
+    
+    if reg_numB == 0:
+       BUS_B = MDR
+    elif reg_numB == 1:
+       BUS_B = PC
+    elif reg_numB == 2:
+       BUS_B = MBR
+    elif reg_numB == 3:
+       BUS_B = X
+    elif reg_numB == 4:
+       BUS_B = Y
+    else:
+       BUS_B = 0
 
 def write_regs(reg_bits):
-    global MAR, MDR, PC, X, Y, H, Z1, Z2, BUS_C
+    global MAR, MDR, PC, X, Y, H, BUS_C
+    
+    if reg_bits & 0b100000:
+       MAR = BUS_C
+    if reg_bits & 0b010000:
+       MDR = BUS_C
+    if reg_bits & 0b001000:
+       PC = BUS_C
+    if reg_bits & 0b000100:
+       X = BUS_C
+    if reg_bits & 0b000010:
+       Y = BUS_C
+    if reg_bits & 0b000001:
+       H = BUS_C
 
-    if reg_bits & WR_MAR: MAR = BUS_C
-    if reg_bits & WR_MDR: MDR = BUS_C
-    if reg_bits & WR_PC:  PC  = BUS_C
-    if reg_bits & WR_X:   X   = BUS_C
-    if reg_bits & WR_Y:   Y   = BUS_C
-    if reg_bits & WR_H:   H   = BUS_C
-    if reg_bits & WR_Z1:  Z1  = BUS_C   # NOVO
-    if reg_bits & WR_Z2:  Z2  = BUS_C   # NOVO
-
-
-def alu(control_bits, save_flags=1):
-    """
-    Executa a operação ALU.
-    save_flags=0: opera normalmente mas NÃO atualiza N/Z (preserva flags do teste anterior).
-    """
+def alu(control_bits):
     global N, Z, BUS_A, BUS_B, BUS_C
-
+    
     a = BUS_A
     b = BUS_B
-
-    shift_bits   = (control_bits >> 6) & 0b11
-    op           = control_bits & 0b00111111
-
-    # ── Operações existentes ──────────────────────────────────────────────────
-    if   op == 0b011000: o = a
-    elif op == 0b010100: o = b
-    elif op == 0b011010: o = ~a
-    elif op == 0b101100: o = ~b
-    elif op == 0b111100: o = a + b
-    elif op == 0b111101: o = a + b + 1
-    elif op == 0b111001: o = a + 1
-    elif op == 0b110101: o = b + 1
-    elif op == 0b111111: o = b - a
-    elif op == 0b110110: o = b - 1
-    elif op == 0b111011: o = -a
-    elif op == 0b001100: o = a & b
-    elif op == 0b011100: o = a | b
-    elif op == 0b010000: o = 0
-    elif op == 0b110001: o = 1
-    elif op == 0b110010: o = -1
-    # ── Novas operações ───────────────────────────────────────────────────────
-    elif op == 0b000001: o = a & 1                                    # A & 1
-    elif op == 0b000010: o = a ^ b                                    # A XOR B
-    elif op == 0b000011:                                               # |A|
-        o = a if not (a & 0x80000000) else (~a + 1) & 0xFFFFFFFF
-    else:                o = 0
-
+    o = 0
+    
+    shift_bits = (control_bits >> 6) & 0b11
+    control_bits = control_bits & 0b00111111
+    
+    if control_bits == 0b011000:
+       o = a
+    elif control_bits == 0b010100:
+       o = b
+    elif control_bits == 0b011010:
+       o = ~a
+    elif control_bits == 0b101100:
+       o = ~b
+    elif control_bits == 0b111100:
+       o = a + b
+    elif control_bits == 0b111101:
+       o = a + b + 1
+    elif control_bits == 0b111001:
+       o = a + 1
+    elif control_bits == 0b110101:
+       o = b + 1
+    elif control_bits == 0b111111:
+       o = b - a
+    elif control_bits == 0b110110:
+       o = b - 1
+    elif control_bits == 0b111011:
+       o = -a
+    elif control_bits == 0b001100:
+       o = a & b
+    elif control_bits == 0b011100:
+       o = a | b
+    elif control_bits == 0b010000:
+       o = 0
+    elif control_bits == 0b110001:
+       o = 1
+    elif control_bits == 0b110010:
+       o = -1
+   
     o = o & 0xFFFFFFFF
 
-    # Shift aplicado antes das flags (resultado final de BUS_C)
-    if   shift_bits == 0b01: o = (o << 1) & 0xFFFFFFFF
-    elif shift_bits == 0b10: o = o >> 1
-    elif shift_bits == 0b11: o = (o << 8) & 0xFFFFFFFF
+    # CORRIGIDO: shift aplicado ANTES das flags, N/Z refletem o valor final de BUS_C
+    if shift_bits == 0b01:
+       o = (o << 1) & 0xFFFFFFFF
+    elif shift_bits == 0b10:
+       o = o >> 1
+    elif shift_bits == 0b11:
+       o = (o << 8) & 0xFFFFFFFF
 
-    # ── SAVE_FLAGS: só atualiza N/Z se permitido ──────────────────────────────
-    if save_flags:
-        if o == 0:
-            N, Z = 0, 1
-        elif o & 0x80000000:
-            N, Z = 1, 0
-        else:
-            N, Z = 0, 0
+    if o == 0:
+        N = 0
+        Z = 1
+    elif o & 0x80000000:    
+        N = 1
+        Z = 0
+    else:
+        N = 0
+        Z = 0
 
     BUS_C = o
-
-
+    
 def next_instruction(nextadd, jam):
-    """
-    Calcula o próximo MPC com base no campo JAM e nas flags N/Z atuais.
-    Adicionados: JAM_NOTZ (pula se Z=0) e JAM_NOTN (pula se N=0).
-    """
     global MPC
-
-    if   jam == JAM_NONE:  MPC = nextadd
-    elif jam == JAM_Z:     MPC = nextadd | (Z << 8)
-    elif jam == JAM_N:     MPC = nextadd | (N << 8)
-    elif jam == JAM_NZ:    MPC = nextadd | ((N | Z) << 8)
-    elif jam == JAM_MBR:   MPC = nextadd | MBR
-    elif jam == JAM_NOTZ:  MPC = nextadd | ((1 - Z) << 8)   # NOVO
-    elif jam == JAM_NOTN:  MPC = nextadd | ((1 - N) << 8)   # NOVO
-    else:                  MPC = nextadd
-
+    
+    if jam == 0b000:
+        MPC = nextadd
+        return
+        
+    if jam & 0b001:
+        nextadd = nextadd | (Z << 8)
+        
+    if jam & 0b010:
+        nextadd = nextadd | (N << 8)
+        
+    if jam & 0b100:
+        nextadd = nextadd | MBR
+        
+    MPC = nextadd
 
 def memory_io(mem_bits):
     global PC, MAR, MDR, MBR
-
-    if mem_bits & MEM_FETCH: MBR = memoria.read_byte(PC)
-    if mem_bits & MEM_READ:  MDR = memoria.read_word(MAR)
-    if mem_bits & MEM_WRITE: memoria.write_word(MAR, MDR)
-
+    
+    if mem_bits & 0b001:
+       MBR = memory.read_byte(PC)
+    if mem_bits & 0b010:
+       MDR = memory.read_word(MAR)
+    if mem_bits & 0b100:
+       memory.write_word(MAR, MDR)
 
 def step():
-    global MIR, MPC
+   global MIR, MPC
+   
+   MIR = firmware[MPC]
+   
+   if MIR == 0:
+      return False
 
-    MIR = firmware[MPC]
-    if MIR == 0:
-        return False
-
-    save_flags = (MIR >> 37) & 1          # NOVO: bit 37
-
-    read_regs(  MIR         & 0b111111)   # bits [5:0]
-    alu(       (MIR >> 17)  & 0xFF,        # bits [24:17]
-                save_flags)
-    write_regs((MIR >>  9)  & 0xFF)       # bits [16:9]  (8 bits — NOVO)
-    memory_io( (MIR >>  6)  & 0b111)      # bits [8:6]
-    next_instruction(
-               (MIR >> 28)  & 0x1FF,      # bits [36:28]
-               (MIR >> 25)  & 0b111)      # bits [27:25]
-
-    return True
+   # CORRIGIDO: máscaras atualizadas para layout de 35 bits
+   read_regs(MIR & 0b111111)
+   alu((MIR >> 15) & 0xFF)
+   write_regs((MIR >>  9) & 0b111111)
+   memory_io((MIR >>  6) & 0b111)
+   next_instruction((MIR >> 26) & 0x1FF,(MIR >> 23) & 0b111)
+   
+   return True
