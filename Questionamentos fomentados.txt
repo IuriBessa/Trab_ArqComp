@@ -10,6 +10,7 @@ fimware observando a composicao de um firmware e usando o BUS_A - BUS_B da alu.
 **É interessante implementar divisão com resto no código
 **É interessante impplementar a alu dupla e ver quais mudanças podem ser feitas nos firmwares para reduzir o ciclo de clock.
 **ver quais firmwares podem ser melhorados com a adicao de Z1 e Z2
+**Ver possibilidade de implementar algo parecido com potenciação
 
 
   
