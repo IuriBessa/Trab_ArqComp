@@ -228,151 +228,217 @@ firmware[59] = 0b1_000111100_010_00010100_00000000_000_000_100
 firmware[60] = 0b0_000000000_000_00110101_00100000_000_010_001
 firmware[316] = 0b0_000001001_000_00010100_00000000_000_000_000
 
+# 61: Y = Y - mem[addr] — 3 ciclos
+firmware[61] = 0b0_010000101_000_00110101_00100000_001_010_001
+firmware[133] = 0b0_010000110_000_00010100_10000000_010_000_010
+firmware[134] = 0b1_000000000_000_00111111_00001000_000_001_100
+
+# 64: X = X AND Y — 1 ciclo
+firmware[64] = 0b1_000000000_000_00001100_00010000_000_101_011
+
+# 65: X = X OR Y — 1 ciclo
+firmware[65] = 0b1_000000000_000_00011100_00010000_000_101_011
+
+# 66: X = immediate — 2 ciclos
+firmware[66] = 0b0_010000111_000_00110101_00100000_001_010_001
+firmware[135] = 0b1_000000000_000_00010100_00010000_000_000_010
+
+# 67: Y = immediate — 2 ciclos
+firmware[67] = 0b0_010001000_000_00110101_00100000_001_010_001
+firmware[136] = 0b1_000000000_000_00010100_00001000_000_000_010
+
+# 68-75 Registradores Z1 e Z2 
+firmware[68] = 0b0_000000000_000_00010100_00000010_000_000_011 # Z1 = X
+firmware[69] = 0b0_000000000_000_00010100_00000010_000_000_100 # Z1 = Y
+firmware[70] = 0b1_000000000_000_00010100_00010000_000_000_101 # X = Z1
+firmware[71] = 0b1_000000000_000_00010100_00001000_000_000_101 # Y = Z1
+firmware[72] = 0b0_000000000_000_00010100_00000001_000_000_011 # Z2 = X
+firmware[73] = 0b0_000000000_000_00010100_00000001_000_000_100 # Z2 = Y
+firmware[74] = 0b1_000000000_000_00010100_00010000_000_000_110 # X = Z2
+firmware[75] = 0b1_000000000_000_00010100_00001000_000_000_110 # Y = Z2
+
+# 76: IF X = odd goto addr - 2-3 ciclos
+firmware[76] = 0b1_001001101_101_00000001_00000000_000_100_000
+firmware[77] = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[317] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+# 78: Y = Y - X — 1 ciclo
+firmware[78] = 0b1_000000000_000_00111111_00001000_000_100_100
+
+# 79: X = X xor Y — 1 ciclo
+firmware[79] = 0b1_000000000_000_00000010_00010000_000_101_011
+
+# 80: X = |X| — 1 ciclo
+firmware[80] = 0b1_000000000_000_00000011_00010000_000_100_000
+
 # 255: HALT
 firmware[255] = 0b0_000000000_000_00000000_00000000_000_000_000
 
 def read_regs(reg_num):
-    global MDR, PC, MBR, X, Y, H, BUS_A, BUS_B
-    
-    reg_numB = reg_num & 0b111
-    reg_numA = (reg_num >> 3) & 0b111
+   global MDR, PC, MBR, X, Y, H, BUS_A, BUS_B
+   
+   reg_numB = reg_num & 0b111
+   reg_numA = (reg_num >> 3) & 0b111
 
-    if reg_numA == 0:
-       BUS_A = H
-    elif reg_numA == 1:
-       BUS_A = MDR
-    elif reg_numA == 2:
-       BUS_A = PC
-    elif reg_numA == 3:
-       BUS_A = MBR
-    elif reg_numA == 4:
-       BUS_A = X
-    elif reg_numA == 5:
-       BUS_A = Y
-    else:
-       BUS_A = 0
-    
-    if reg_numB == 0:
-       BUS_B = MDR
-    elif reg_numB == 1:
-       BUS_B = PC
-    elif reg_numB == 2:
-       BUS_B = MBR
-    elif reg_numB == 3:
-       BUS_B = X
-    elif reg_numB == 4:
-       BUS_B = Y
-    else:
-       BUS_B = 0
+   if reg_numA == 0:
+      BUS_A = H
+   elif reg_numA == 1:
+      BUS_A = MDR
+   elif reg_numA == 2:
+      BUS_A = PC
+   elif reg_numA == 3:
+      BUS_A = MBR
+   elif reg_numA == 4:
+      BUS_A = X
+   elif reg_numA == 5:
+      BUS_A = Y
+   elif reg_numA == 6:
+      BUS_A = Z1
+   elif reg_numA == 7:
+      BUS_A = Z2
+   
+   if reg_numB == 0:
+      BUS_B = MDR
+   elif reg_numB == 1:
+      BUS_B = PC
+   elif reg_numB == 2:
+      BUS_B = MBR
+   elif reg_numB == 3:
+      BUS_B = X
+   elif reg_numB == 4:
+      BUS_B = Y
+   elif reg_numB == 5:
+      BUS_B = Z1
+   elif reg_numB == 6:
+      BUS_B = Z2
+   else:
+      BUS_B = 0
 
 def write_regs(reg_bits):
-    global MAR, MDR, PC, X, Y, H, BUS_C
-    
-    if reg_bits & 0b100000:
-       MAR = BUS_C
-    if reg_bits & 0b010000:
-       MDR = BUS_C
-    if reg_bits & 0b001000:
-       PC = BUS_C
-    if reg_bits & 0b000100:
-       X = BUS_C
-    if reg_bits & 0b000010:
-       Y = BUS_C
-    if reg_bits & 0b000001:
-       H = BUS_C
-
-def alu(control_bits):
-    global N, Z, BUS_A, BUS_B, BUS_C
-    
-    a = BUS_A
-    b = BUS_B
-    o = 0
-    
-    shift_bits = (control_bits >> 6) & 0b11
-    control_bits = control_bits & 0b00111111
-    
-    if control_bits == 0b011000:
-       o = a
-    elif control_bits == 0b010100:
-       o = b
-    elif control_bits == 0b011010:
-       o = ~a
-    elif control_bits == 0b101100:
-       o = ~b
-    elif control_bits == 0b111100:
-       o = a + b
-    elif control_bits == 0b111101:
-       o = a + b + 1
-    elif control_bits == 0b111001:
-       o = a + 1
-    elif control_bits == 0b110101:
-       o = b + 1
-    elif control_bits == 0b111111:
-       o = b - a
-    elif control_bits == 0b110110:
-       o = b - 1
-    elif control_bits == 0b111011:
-       o = -a
-    elif control_bits == 0b001100:
-       o = a & b
-    elif control_bits == 0b011100:
-       o = a | b
-    elif control_bits == 0b010000:
-       o = 0
-    elif control_bits == 0b110001:
-       o = 1
-    elif control_bits == 0b110010:
-       o = -1
+   global MAR, MDR, PC, X, Y, H, BUS_C
    
-    o = o & 0xFFFFFFFF
+   if reg_bits & 0b10000000:
+      MAR = BUS_C
+   if reg_bits & 0b01000000:
+      MDR = BUS_C
+   if reg_bits & 0b00100000:
+      PC = BUS_C
+   if reg_bits & 0b00010000:
+      X = BUS_C
+   if reg_bits & 0b00001000:
+      Y = BUS_C
+   if reg_bits & 0b00000100:
+      H = BUS_C
+   if reg_bits & 0b00000010:
+      Z1 = BUS_C
+   if reg_bits & 0b00000001:
+      Z2 = BUS_C
 
-    # CORRIGIDO: shift aplicado ANTES das flags, N/Z refletem o valor final de BUS_C
-    if shift_bits == 0b01:
-       o = (o << 1) & 0xFFFFFFFF
-    elif shift_bits == 0b10:
-       o = o >> 1
-    elif shift_bits == 0b11:
-       o = (o << 8) & 0xFFFFFFFF
+def alu(control_bits, save_flags):
+   global N, Z, BUS_A, BUS_B, BUS_C
+   
+   a = BUS_A
+   b = BUS_B
+   o = 0
+   
+   shift_bits = (control_bits >> 6) & 0b11
+   control_bits = control_bits & 0b00111111
+   
+   if control_bits == 0b011000:
+      o = a
+   elif control_bits == 0b010100:
+      o = b
+   elif control_bits == 0b011010:
+      o = ~a
+   elif control_bits == 0b101100:
+      o = ~b
+   elif control_bits == 0b111100:
+      o = a + b
+   elif control_bits == 0b111101:
+      o = a + b + 1
+   elif control_bits == 0b111001:
+      o = a + 1
+   elif control_bits == 0b110101:
+      o = b + 1
+   elif control_bits == 0b111111:
+      o = b - a
+   elif control_bits == 0b110110:
+      o = b - 1
+   elif control_bits == 0b111011:
+      o = -a
+   elif control_bits == 0b001100:
+      o = a & b
+   elif control_bits == 0b011100:
+      o = a | b
+   elif control_bits == 0b010000:
+      o = 0
+   elif control_bits == 0b110001:
+      o = 1
+   elif control_bits == 0b110010:
+      o = -1
+   elif control_bits == 0b000001:
+      o = a & 1                                    # A & 1
+   elif control_bits == 0b000010:
+      o = a ^ b                                    # A XOR B
+   elif control_bits == 0b000011:                                               # |A|
+      o = a
+      if not (a & 0x80000000):
+         o = a
+      else:
+         o = (~a + 1) & 0xFFFFFFFF
 
-    if o == 0:
-        N = 0
-        Z = 1
-    elif o & 0x80000000:    
-        N = 1
-        Z = 0
-    else:
-        N = 0
-        Z = 0
+   o = o & 0xFFFFFFFF
 
-    BUS_C = o
+   # CORRIGIDO: shift aplicado ANTES das flags, N/Z refletem o valor final de BUS_C
+   if shift_bits == 0b01:
+      o = (o << 1) & 0xFFFFFFFF
+   elif shift_bits == 0b10:
+      o = o >> 1
+   elif shift_bits == 0b11:
+      o = (o << 8) & 0xFFFFFFFF
+
+   if o == 0:
+      N = 0
+      Z = 1
+   elif o & 0x80000000:    
+      N = 1
+      Z = 0
+   else:
+      N = 0
+      Z = 0
+
+   BUS_C = o
     
 def next_instruction(nextadd, jam):
-    global MPC
-    
-    if jam == 0b000:
-        MPC = nextadd
-        return
+   global MPC
+   
+   if jam == 0b000:
+      MPC = nextadd
+      return
+   elif jam & 0b001:
+      nextadd = nextadd | (Z << 8)   
+   elif jam & 0b010:
+      nextadd = nextadd | (N << 8)
+   elif jam & 0b011:
+      nextadd = nextadd | ((N | Z) << 8)
+   elif jam & 0b100:
+      nextadd = nextadd | MBR
+   elif jam & 0b101:
+      nextadd = nextadd | ((1 - Z) << 8) 
+   elif jam & 0b110:
+      nextadd = nextadd | ((1 - N) << 8)
         
-    if jam & 0b001:
-        nextadd = nextadd | (Z << 8)
-        
-    if jam & 0b010:
-        nextadd = nextadd | (N << 8)
-        
-    if jam & 0b100:
-        nextadd = nextadd | MBR
-        
-    MPC = nextadd
+   MPC = nextadd
 
 def memory_io(mem_bits):
-    global PC, MAR, MDR, MBR
-    
-    if mem_bits & 0b001:
-       MBR = memory.read_byte(PC)
-    if mem_bits & 0b010:
-       MDR = memory.read_word(MAR)
-    if mem_bits & 0b100:
-       memory.write_word(MAR, MDR)
+   global PC, MAR, MDR, MBR
+   
+   if mem_bits & 0b001:
+      MBR = memory.read_byte(PC)
+   if mem_bits & 0b010:
+      MDR = memory.read_word(MAR)
+   if mem_bits & 0b100:
+      memory.write_word(MAR, MDR)
 
 def step():
    global MIR, MPC
@@ -382,11 +448,12 @@ def step():
    if MIR == 0:
       return False
 
-   # CORRIGIDO: máscaras atualizadas para layout de 35 bits
+   save_flags = (MIR >> 37) & 0b1
+
    read_regs(MIR & 0b111111)
-   alu((MIR >> 15) & 0xFF)
-   write_regs((MIR >>  9) & 0b111111)
+   alu((MIR >> 17) & 0xFF, save_flags)
+   write_regs((MIR >>  9) & 0xFF)
    memory_io((MIR >>  6) & 0b111)
-   next_instruction((MIR >> 26) & 0x1FF,(MIR >> 23) & 0b111)
+   next_instruction((MIR >> 28) & 0x1FF,(MIR >> 25) & 0b111)
    
    return True
