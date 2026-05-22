@@ -1,11 +1,4 @@
 Questionamentos principais:
-**É interessante que criemos no assembler as instrucoes de deslocamento de bits (<< 1, >> 1, << 8) pois na ALU são executadas
-depois da operação principal, ocupando o mesmo ciclo mas sem instrução correspondente
-no assembler — o programador não pode usá-las diretamente. 
-Expor essas operações como instruções (shl, shr) permitiria multiplicações e divisões por 2 em apenas 1 ciclo em vez de vários. (c)
-**É interessante criar um firmware para organizar um >, ja tem as intrucoes necessaris, é importante apenas formular como fazer esse
-fimware observando a composicao de um firmware e usando o BUS_A - BUS_B da alu.
-**É interessante estudar para que BUS_A não seja sempre igual à H, para que possamos fazer mais operações.
 **É interessante implementar a multiplicação no firmware usando menos codigo (vr como isso seria possivel)
 **É interessante implementar divisão com resto no código
 **É interessante impplementar a alu dupla e ver quais mudanças podem ser feitas nos firmwares para reduzir o ciclo de clock.
@@ -15,17 +8,10 @@ fimware observando a composicao de um firmware e usando o BUS_A - BUS_B da alu.
 
   
 1.Criar um IR otimizaria o processador descobrecarregando o MBR? (g) EXPPLIÇÃO MAIOR ABAIXO.
-2.Porque N e Z estão realmente precisando ser opostos? (g)
-3.Como aproveitar o Y que não está sendo utilizado no código? (g)
 4.Cada micro-instrução de "buscar e executar" uma instrução custa vários ciclos. Por exemplo,add precisa de 4 micro-instruções (ciclos 2, 3, 4 e 5).
 isso é chamado de "latência" algumas dessas etapas poderiam ser fundidas — por exemplo, 
 ler a memória e carregar H em um único passo — reduzindo add de 4 para 3 ciclos. Isso seria implementar um ir?, como fazer isso na pratica p fundir (c)
 o próprio MIR costuma ter um pedaço (alguns bits) dedicado exclusivamente a dizer qual é o próximo endereço padrão ou para onde pular.
-5.firmware = array('L',[0]) * 512 Esta linha cria o firmware — a memória interna do processador que guarda as micro-instruções.
-array('L', [0]) — cria um array com um único elemento zero, do tipo L (unsigned long, inteiro sem sinal de 32 bits)
-* 512 — replica isso 512 vezes, criando 512 posições 512 posições porque o endereço de próxima micro-instrução tem 9 bits, e 2⁹ = 512. 
-Então o firmware pode ter no máximo 512 micro-instruções diferentes. Isso faz com que eu acesse menos memoria doq deveria ou deve ser feito assim mesmo? esse de receber um 
-L faz com que eu receba só 32 bits? eu preciso aumentar?
 Implementar no firmware DESLCAMENTO, MULTIPLICAÇÃO DIVISÃO.
 
 
@@ -34,32 +20,6 @@ Questionamentos 2:
 Você tem apenas X, Y, H visíveis para o programador. H é só rascunho interno. Na prática o assembler tem 2 registradores de propósito geral.
 Impacto: Força uso de memória para guardar temporários, custando 2–3 ciclos por acesso (MAR, READ/WRITE, MDR).
 Solução: Adicionar registradores, por exemplo Z1, Z2 (evitando conflito com seu flag Z). No layout do MIR você tem 3 bits para BUS_A e 3 bits para BUS_B — isso suporta até 8 fontes cada, e hoje você só usa 6. Sobram 2 slots livres em cada barramento.
-
-
-
-Problema: a & b e a | b existem, mas ambos os operandos vêm de registradores. Não existe forma de fazer X & 1 sem antes carregar 1 num registrador ou na memória.
-Impacto direto: Impossibilita testar bits individuais de forma eficiente — bloqueia shift-and-add, máscaras, flags de paridade.
-Solução: Adicionar uma constante implícita na ALU. Dois caminhos:
-Simples: Adicionar o = a & 1 e o = a | 1 como operações novas (aproveitando bits [7:6] do campo ALU que você usa para shift — reorganizando).
-Melhor: Adicionar um registrador IMM (imediato) que o fetch carrega com o próximo byte, similar ao MBR mas para operandos, não endereços.
-
-
-Campo ALU — Bits desperdiçados
-Problema: O campo ALU tem 8 bits, mas shift ocupa os 2 mais significativos [7:6] e a operação usa 6 bits [5:0]. Porém, dos 64 valores possíveis nos 6 bits, você usa apenas 16 operações. Sobram 48 combinações sem uso.
-Solução: Usar combinações livres para operações compostas úteis como:
-
-a & 1 — testa bit 0 (essencial pra multiplicação)
-a XOR b — muito útil, hoje ausente
-|a| — valor absoluto
-a & 0xFF — máscara de byte
-
-
-
-Flags N e Z — Só atualizadas pela ALU
-Problema: N e Z são atualizados a cada operação ALU, mesmo quando você não quer (ex: ao mover dados com ALU=B para carregar MAR, você sobrescreve as flags acidentalmente).
-Impacto: Em sequências como "carrega endereço, lê memória, testa resultado", as flags do teste podem ser corrompidas pelo ciclo de carga.
-Solução: Adicionar 1 bit no MIR chamado SAVE_FLAGS — quando 0, a ALU opera mas não atualiza N/Z. Só custa 1 bit no MIR.
-
 
 
   Quem está fazendo o papel do IR, de forma adaptada, é o MBR (Memory Byte Buffer Register).
@@ -104,73 +64,6 @@ Portanto, o MBR e o IR são o mesmo registrador na prática.
 
 
 
-1. Registrador H inacessível via software (maior impacto)
-Problema: H só é usado em SWAP (48). Para Fibonacci você precisa de 3 variáveis simultâneas (fib_n, fib_n1, temp), forçando mem[addr] stores/loads custando 3 ciclos cada.
-Solução: Adicionar instruções de acesso a H:
-python# H = X (opcode 53) — 1 ciclo
-firmware[53] = 0b000000000_000_00010100_000001_000_000_011
-# X = H (opcode 54) — 1 ciclo
-firmware[54] = 0b000000000_000_00011000_000100_000_000_000
-# H = Y (opcode 55) — 1 ciclo
-firmware[55] = 0b000000000_000_00010100_000001_000_000_100
-# Y = H (opcode 56) — 1 ciclo
-firmware[56] = 0b000000000_000_00011000_000010_000_000_000
-Fibonacci sem H: cada iteração precisa de 2-3 mem ops (~6-9 ciclos extras por loop).
-Fibonacci com H: loop de ~4-5 ciclos/iteração.
-
-2. Branches condicionais para Y inexistentes
-Problema: Só existe IF Y == 0 (opcode 35). Para loops de contagem regressiva, a falta de IF Y <= 0 força código extra (Y--, testar, tratar -1), custando ~3 ciclos adicionais por iteração.
-Solução:
-python# IF Y <= 0 GOTO addr (opcode 57) — JAM=011 (N|Z) testando Y
-# Ciclo 57: testa Y; se N|Z → GOTO 313 (57|256), senão GOTO 58
-firmware[57]  = 0b000111010_011_00010100_000000_000_000_100
-# Ciclo 58 (Y>0): descarta byte de endereço
-firmware[58]  = 0b000000000_000_00110101_001000_000_010_001
-# Ciclo 313 (Y<=0): GOTO 9
-firmware[313] = 0b000001001_000_00010100_000000_000_000_000
-
-# IF Y < 0 GOTO addr (opcode 59) — JAM=010 (N)
-firmware[59]  = 0b000111101_010_00010100_000000_000_000_100
-firmware[60]  = 0b000000000_000_00110101_001000_000_010_001
-firmware[316] = 0b000001001_000_00010100_000000_000_000_000
-
-3. Falta Y = Y - mem[addr]
-Problema: Existe Y = Y + mem[addr] (opcode 25) mas não o simétrico. Subtração em Y exige sequência SWAP → X = X - mem[addr] → SWAP, custando ~8 ciclos extras.
-Solução:
-python# Y = Y - mem[addr] (opcode 61) — 3 ciclos
-firmware[61] = 0b000111111_000_00110101_001000_001_010_001  # PC++; FETCH; GOTO 62
-firmware[62] = 0b000111110_000_00010100_100000_010_000_010  # MAR=MBR; READ; GOTO 63
-# BUS_A=MDR(001), BUS_B=Y(100), ALU=B-A(00111111), WRITE=Y(000010)
-firmware[63] = 0b000000000_000_00111111_000010_000_001_100  # Y=Y-MDR; GOTO 0
-
-4. Ausência de X = X AND Y / X = X OR Y
-Para o Programa 4 (maior que), a comparação pode ser implementada com shifts e ANDs sem branches adicionais:
-python# X = X AND Y (opcode 64)
-# BUS_A=Y(101), BUS_B=X(011), ALU=A&B(00001100), WRITE=X(000100)
-firmware[64] = 0b000000000_000_00001100_000100_000_101_011
-
-# X = X OR Y (opcode 65)
-# BUS_A=Y(101), BUS_B=X(011), ALU=A|B(00011100), WRITE=X(000100)
-firmware[65] = 0b000000000_000_00011100_000100_000_101_011
-
-
-
-Sugestões concretas
-1. IF X_ODD GOTO addr — teste de bit LSB (1–2 ciclos)
-Impacto: multiplicação e fatorial
-Atualmente, para testar se X é ímpar (necessário no shift-and-add), é preciso fazer X = X AND 1 via memória ou subtrações. Uma instrução que testa o bit 0 diretamente:
-firmware[N] = JAM baseado em (X & 1), sem alterar X
-Isso reduz um laço de multiplicação de ~8 instruções para ~5 por iteração de bit.
-
-2. X = X + imediato / X = imediato com byte do MBR — carga sem acesso à memória (1 ciclo vs 3)
-Impacto: todos os programas
-Você já tem MBR disponível no BUS_B. Adicionar:
-
-40i: X = MBR (depois do FETCH do opcode seguinte) — carrega constante em 1 ciclo extra ao invés de 3 ciclos de READ.
-2i: X = X + MBR — adição com imediato
-
-Fatorial e Fibonacci precisam muito de carregar constantes (0, 1, N).
-
 3. CALL / RET com pilha simples
 Impacto: fatorial (sub-rotina de multiplicação)
 Sem CALL/RET, você precisa replicar o código de multiplicação inline para cada uso. Bastariam 2 novas instruções:
@@ -180,17 +73,6 @@ RET — restaura PC de H
 
 Com isso, a sub-rotina de multiplicação é escrita uma vez e o fatorial a chama em loop.
 
-4. IF Y < 0 e IF Y <= 0 — branches simétricos para Y
-Impacto: fibonacci, maior que
-Atualmente só X tem IF X < 0 (18) e IF X <= 0 (43). Y só tem IF Y == 0 (35). Para Fibonacci, o contador de loop costuma ficar em Y enquanto X/Y acumulam a sequência — forçando trocas caras (SWAP, Y=X) só para fazer o branch.
-
-5. X = X AND Y / X = X OR Y — operações lógicas entre registradores (1 ciclo)
-Impacto: multiplicação (teste de bit mais limpo)
-A ALU já suporta AND/OR, mas não há opcode de macroinstrução para X = X AND Y. Com Y=1 carregado, X AND Y isolaria o LSB em 1 ciclo, substituindo o IF X_ODD ou tornando-o desnecessário.
-
-6. Y = Y - X / Y = X - Y — subtração direta entre registradores (1 ciclo)
-Impacto: maior que, fibonacci
-Só existe X = X - Y (46). Para "maior que", às vezes precisa de Y - X e acaba fazendo SWAP (3 microciclos) + subtração.
 
 Prioridade sugerida
 1. IF X_ODD          ← desbloqueador da multiplicação eficiente
