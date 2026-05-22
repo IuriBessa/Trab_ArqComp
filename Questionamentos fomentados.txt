@@ -6,6 +6,12 @@ Expor essas operações como instruções (shl, shr) permitiria multiplicações
 **É interessante criar um firmware para organizar um >, ja tem as intrucoes necessaris, é importante apenas formular como fazer esse
 fimware observando a composicao de um firmware e usando o BUS_A - BUS_B da alu.
 **É interessante estudar para que BUS_A não seja sempre igual à H, para que possamos fazer mais operações.
+**É interessante implementar a multiplicação no firmware usando menos codigo (vr como isso seria possivel)
+**É interessante implementar divisão com resto no código
+**É interessante impplementar a alu dupla e ver quais mudanças podem ser feitas nos firmwares para reduzir o ciclo de clock.
+**ver quais firmwares podem ser melhorados com a adicao de Z1 e Z2
+**Ver possibilidade de implementar algo parecido com potenciação
+
 
   
 1.Criar um IR otimizaria o processador descobrecarregando o MBR? (g) EXPPLIÇÃO MAIOR ABAIXO.
