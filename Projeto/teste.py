@@ -397,15 +397,13 @@ def alu(control_bits, save_flags):
    elif shift_bits == 0b11:
       o = (o << 8) & 0xFFFFFFFF
 
-   if o == 0:
-      N = 0
-      Z = 1
-   elif o & 0x80000000:    
-      N = 1
-      Z = 0
-   else:
-      N = 0
-      Z = 0
+   if save_flags:
+    if o == 0:
+        N = 0; Z = 1
+    elif o & 0x80000000:
+        N = 1; Z = 0
+    else:
+        N = 0; Z = 0
 
    BUS_C = o
     
