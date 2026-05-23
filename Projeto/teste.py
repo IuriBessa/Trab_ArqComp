@@ -206,14 +206,14 @@ firmware[49] = 0b1_000000000_000_01010100_00001000_000_000_100
 # BUS_B=Y(100), ALU=shift>>1+B(10_010100), WRITE=Y(000010)
 firmware[50] = 0b1_000000000_000_10010100_00001000_000_000_100
 
-# 53: H = X - 1 ciclo 
-firmware[53] = 0b0_000000000_000_00010100_00000010_000_000_011
+# 53: H = X - 1 ciclo
+firmware[53] = 0b0_000000000_000_00010100_00000100_000_000_011
 
 # 54: X = H - 1 ciclo
 firmware[54] = 0b1_000000000_000_00011000_00010000_000_000_000
 
 # 55: H = Y - 1 ciclo
-firmware[55] = 0b0_000000000_000_00010100_00001000_000_000_100
+firmware[55] = 0b0_000000000_000_00010100_00000100_000_000_100
 
 # 56: Y = H - 1 ciclo 
 firmware[56] = 0b1_000000000_000_00011000_00001000_000_000_000
@@ -260,7 +260,7 @@ firmware[75] = 0b1_000000000_000_00010100_00001000_000_000_110 # Y = Z2
 # 76: IF X = odd goto addr - 2-3 ciclos
 firmware[76] = 0b1_001001101_101_00000001_00000000_000_100_000
 firmware[77] = 0b0_000000000_000_00110101_00100000_000_010_001
-firmware[317] = 0b0_000001001_000_00010100_00000000_000_000_000
+firmware[333] = 0b0_000001001_000_00010100_00000000_000_000_000
 
 # 78: Y = Y - X — 1 ciclo
 firmware[78] = 0b1_000000000_000_00111111_00001000_000_100_100
@@ -275,7 +275,7 @@ firmware[80] = 0b1_000000000_000_00000011_00010000_000_100_000
 firmware[255] = 0b0_000000000_000_00000000_00000000_000_000_000
 
 def read_regs(reg_num):
-   global MDR, PC, MBR, X, Y, H, BUS_A, BUS_B
+   global MDR, PC, MBR, X, Y, H, BUS_A, BUS_B, Z1, Z2
    
    reg_numB = reg_num & 0b111
    reg_numA = (reg_num >> 3) & 0b111
@@ -315,7 +315,7 @@ def read_regs(reg_num):
       BUS_B = 0
 
 def write_regs(reg_bits):
-   global MAR, MDR, PC, X, Y, H, BUS_C
+   global MAR, MDR, PC, X, Y, H, BUS_C, Z1, Z2
    
    if reg_bits & 0b10000000:
       MAR = BUS_C
@@ -415,19 +415,19 @@ def next_instruction(nextadd, jam):
    if jam == 0b000:
       MPC = nextadd
       return
-   elif jam & 0b001:
-      nextadd = nextadd | (Z << 8)   
-   elif jam & 0b010:
+   elif jam == 0b001:
+      nextadd = nextadd | (Z << 8)
+   elif jam == 0b010:
       nextadd = nextadd | (N << 8)
-   elif jam & 0b011:
+   elif jam == 0b011:
       nextadd = nextadd | ((N | Z) << 8)
-   elif jam & 0b100:
+   elif jam == 0b100:
       nextadd = nextadd | MBR
-   elif jam & 0b101:
-      nextadd = nextadd | ((1 - Z) << 8) 
-   elif jam & 0b110:
+   elif jam == 0b101:
+      nextadd = nextadd | ((1 - Z) << 8)
+   elif jam == 0b110:
       nextadd = nextadd | ((1 - N) << 8)
-        
+
    MPC = nextadd
 
 def memory_io(mem_bits):

@@ -263,8 +263,3 @@ if lines_to_bin_step1():
     fdst.write(bytearray(byte_arr))
     fdst.close()
 
-    print(f"Montagem concluída: {len(byte_arr)} bytes → '{sys.argv[2]}'")
-    if '--map' in sys.argv:
-        print("\n--- Mapa de endereços ---")
-        for nome, addr in names:
-            print(f"  {nome:<15} byte={addr:3d}  word={addr//4:3d}")
