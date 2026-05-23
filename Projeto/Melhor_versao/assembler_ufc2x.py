@@ -1,90 +1,109 @@
 import sys
 
 # ==============================================================================
-# assembler_ufc2x.py  —  Assembler para o processador ufc2x (processador.py)
+# assembler_teste.py  —  Assembler para o processador definido em teste.py
 #
 # USO:
-#   python assembler_ufc2x.py programa.asm saida.bin
+#   python assembler_teste.py programa.asm saida.bin
 #
 # FORMATO DO ARQUIVO .asm:
 #   [label:] instrução [operando]   ; comentário opcional
 #
-# EXEMPLO:
-#   inicio: clrx                    ; X = 0
-#           ldx valor               ; X = mem[valor]
-#           jz  fim                 ; se X==0, pula
-#           decx
-#           goto inicio
-#   fim:    halt
-#   valor:  ww 42                   ; declara palavra de 32 bits = 42
+# Igual ao assembler_ufc2x.py, mas com as instruções extras suportadas pelo
+# teste.py (registradores Z1/Z2, imediatos, novos saltos, lógicas, etc.).
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
 # TABELA DE INSTRUÇÕES
 #
-# Para ADICIONAR uma nova instrução ao processador, basta inserir uma entrada
-# no dicionário correto abaixo, de acordo com o tipo de operando:
-#
-#   no_op_instructions  → instrução SEM operando        (ex: halt, incx)
-#   mem_instructions    → instrução com ENDEREÇO DE MEMÓRIA (ex: ldx, add)
-#   jmp_instructions    → instrução com ENDEREÇO DE SALTO   (ex: goto, jz)
-#
-# O valor de cada entrada é o opcode (número da linha no firmware).
+# no_op_instructions  → instrução SEM operando        (1 byte)
+# mem_instructions    → instrução com ENDEREÇO DE MEMÓRIA (2 bytes)
+# jmp_instructions    → instrução com ENDEREÇO DE SALTO   (2 bytes)
+# imm_instructions    → instrução com VALOR IMEDIATO de 1 byte (2 bytes)
 # ------------------------------------------------------------------------------
 
 # Instruções sem operando — apenas emitem 1 byte (o opcode)
 no_op_instructions = {
-    'halt'  : 0xFF,   # para execução
-    'incx'  : 16,     # X = X + 1
-    'decx'  : 17,     # X = X - 1
-    'incy'  : 33,     # Y = Y + 1
-    'decy'  : 34,     # Y = Y - 1
-    'ytox'  : 20,     # Y = X
-    'xtoy'  : 21,     # X = Y
-    'shlx'  : 31,     # X = X << 1  (X * 2)
-    'shrx'  : 32,     # X = X >> 1  (X / 2)
-    'shly'  : 49,     # Y = Y << 1  (Y * 2)
-    'shry'  : 50,     # Y = Y >> 1  (Y / 2)
-    'addxy' : 45,     # X = X + Y
-    'subxy' : 46,     # X = X - Y
-    'addyx' : 47,     # Y = X + Y
-    'swap'  : 48,     # troca X <-> Y
-    'clrx'  : 41,     # X = 0
-    'clry'  : 42,     # Y = 0
+    'halt'  : 0xFF,
+    'incx'  : 16,
+    'decx'  : 17,
+    'incy'  : 33,
+    'decy'  : 34,
+    'ytox'  : 20,
+    'xtoy'  : 21,
+    'shlx'  : 31,
+    'shrx'  : 32,
+    'shly'  : 49,
+    'shry'  : 50,
+    'addxy' : 45,
+    'subxy' : 46,
+    'addyx' : 47,
+    'swap'  : 48,
+    'clrx'  : 41,
+    'clry'  : 42,
+    # Novos em teste.py
+    'xtoh'  : 53,   # H = X
+    'htox'  : 54,   # X = H
+    'ytoh'  : 55,   # H = Y
+    'htoy'  : 56,   # Y = H
+    'andxy' : 64,   # X = X AND Y
+    'orxy'  : 65,   # X = X OR  Y
+    'xtoz1' : 68,   # Z1 = X
+    'ytoz1' : 69,   # Z1 = Y
+    'z1tox' : 70,   # X  = Z1
+    'z1toy' : 71,   # Y  = Z1
+    'xtoz2' : 72,   # Z2 = X
+    'ytoz2' : 73,   # Z2 = Y
+    'z2tox' : 74,   # X  = Z2
+    'z2toy' : 75,   # Y  = Z2
+    'subyx' : 78,   # Y = Y - X
+    'xorxy' : 79,   # X = X XOR Y
+    'absx'  : 80,   # X = |X|
 }
 
 # Instruções com endereço de MEMÓRIA — emitem 2 bytes: [opcode, word_addr]
-# word_addr = byte_addr // 4  (memória endereçada por words de 32 bits)
 mem_instructions = {
-    'add'   : 2,      # X = X + mem[addr]
-    'sub'   : 13,     # X = X - mem[addr]
-    'mov'   : 6,      # mem[addr] = X  (store X)
-    'ldx'   : 40,     # X = mem[addr]  (load X)
-    'addy'  : 25,     # Y = Y + mem[addr]
-    'ldy'   : 28,     # Y = mem[addr]  (load Y)
-    'movy'  : 22,     # mem[addr] = Y  (store Y)
+    'add'   : 2,
+    'sub'   : 13,
+    'mov'   : 6,
+    'ldx'   : 40,
+    'addy'  : 25,
+    'ldy'   : 28,
+    'movy'  : 22,
+    # Novos em teste.py
+    'suby'  : 61,   # Y = Y - mem[addr]
 }
 
 # Instruções com endereço de SALTO — emitem 2 bytes: [opcode, byte_addr]
-# byte_addr = endereço absoluto em bytes no binário
 jmp_instructions = {
-    'goto'  : 9,      # PC = addr  (salto incondicional)
-    'jz'    : 11,     # se X == 0, PC = addr
-    'jn'    : 18,     # se X < 0,  PC = addr
-    'jzy'   : 35,     # se Y == 0, PC = addr
-    'jle'   : 43,     # se X <= 0, PC = addr
+    'goto'  : 9,
+    'jz'    : 11,
+    'jn'    : 18,
+    'jzy'   : 35,
+    'jle'   : 43,
+    # Novos em teste.py
+    'jley'  : 57,   # IF Y <= 0 GOTO addr
+    'jny'   : 59,   # IF Y <  0 GOTO addr
+    'jodd'  : 76,   # IF X ímpar GOTO addr
+}
+
+# Instruções com VALOR IMEDIATO — emitem 2 bytes: [opcode, imm_byte (0..255)]
+imm_instructions = {
+    'ldxi'  : 66,   # X = imm
+    'ldyi'  : 67,   # Y = imm
 }
 
 # Todas as palavras-chave reservadas
 all_keywords = (set(no_op_instructions) | set(mem_instructions) |
-                set(jmp_instructions) | {'wb', 'ww'})
+                set(jmp_instructions)   | set(imm_instructions) |
+                {'wb', 'ww'})
 
 # ------------------------------------------------------------------------------
 # Estado global
 # ------------------------------------------------------------------------------
-lines     = []   # linhas tokenizadas
-lines_bin = []   # bytes de cada linha (labels ainda como strings)
-names     = []   # lista de (nome_label, índice_linha)
+lines     = []
+lines_bin = []
+names     = []
 
 # ------------------------------------------------------------------------------
 # Funções auxiliares
@@ -110,23 +129,27 @@ def encode_no_op(inst):
     return [no_op_instructions[inst]]
 
 def encode_mem(inst, ops):
-    """Instrução com endereço de memória: [opcode, label_placeholder]"""
     if len(ops) < 1:
         return []
     if not is_name(ops[0]):
         return []
-    return [mem_instructions[inst], ops[0]]   # ops[0] é resolvido depois
+    return [mem_instructions[inst], ops[0]]
 
 def encode_jmp(inst, ops):
-    """Instrução de salto: [opcode, label_placeholder]"""
     if len(ops) < 1:
         return []
     if not is_name(ops[0]):
         return []
-    return [jmp_instructions[inst], ops[0]]   # ops[0] é resolvido depois
+    return [jmp_instructions[inst], ops[0]]
+
+def encode_imm(inst, ops):
+    """Instrução com imediato: [opcode, byte_imm]"""
+    if not ops or not ops[0].lstrip('-').isnumeric():
+        return []
+    val = int(ops[0]) & 0xFF
+    return [imm_instructions[inst], val]
 
 def encode_wb(ops):
-    """wb <valor 0-255>: emite 1 byte cru"""
     if not ops or not ops[0].lstrip('-').isnumeric():
         return []
     val = int(ops[0])
@@ -135,7 +158,6 @@ def encode_wb(ops):
     return [val]
 
 def encode_ww(ops):
-    """ww <valor 0..2^32-1>: emite 4 bytes em little-endian"""
     if not ops or not ops[0].lstrip('-').isnumeric():
         return []
     val = int(ops[0]) & 0xFFFFFFFF
@@ -153,6 +175,8 @@ def encode_instruction(inst, ops):
         return encode_mem(inst, ops)
     elif inst in jmp_instructions:
         return encode_jmp(inst, ops)
+    elif inst in imm_instructions:
+        return encode_imm(inst, ops)
     elif inst == 'wb':
         return encode_wb(ops)
     elif inst == 'ww':
@@ -186,45 +210,33 @@ def lines_to_bin_step1():
 def find_names():
     for k, line in enumerate(lines):
         if not is_instruction(line[0]):
-            names.append((line[0], k))   # (nome, índice de linha)
+            names.append((line[0], k))
 
 # ------------------------------------------------------------------------------
-# Passo 2: resolução de endereços reais
+# Passo 2: resolução de endereços
 # ------------------------------------------------------------------------------
 
 def count_bytes(line_number):
-    """Retorna o byte offset da linha no binário final (começa em 1, pois byte 0 é reservado)."""
     byte = 1
     for i in range(line_number):
         byte += len(lines_bin[i])
     return byte
 
 def resolve_names():
-    # Converte índices de linha em offsets de bytes
     for i in range(len(names)):
         names[i] = (names[i][0], count_bytes(names[i][1]))
 
-    # Substitui strings de label pelos endereços numéricos
     for line in lines_bin:
         for i in range(len(line)):
             if is_name(line[i]):
                 byte_addr = get_name_byte(line[i])
                 opcode    = line[i - 1]
 
-                # -------------------------------------------------------
-                # REGRA DE ENDEREÇAMENTO — importante para novas instruções
-                #
-                # Instruções de MEMÓRIA (read/write_word via MAR):
-                #   MAR = MBR → read_word(MAR) usa endereço de word
-                #   Portanto: word_addr = byte_addr // 4
-                #
-                # Instruções de SALTO (PC = MBR):
-                #   PC é byte address → usa byte_addr direto
-                # -------------------------------------------------------
+                # Memória usa word address; salto usa byte address.
                 if opcode in mem_instructions.values():
-                    line[i] = byte_addr // 4    # word address
+                    line[i] = byte_addr // 4
                 else:
-                    line[i] = byte_addr         # byte address
+                    line[i] = byte_addr
 
 # ------------------------------------------------------------------------------
 # Leitura do arquivo fonte
@@ -233,11 +245,8 @@ def resolve_names():
 fsrc = open(str(sys.argv[1]), 'r')
 
 for raw_line in fsrc:
-    # Remove comentários (tudo após ';')
     text = raw_line.split(';')[0]
-    # Tokeniza
     tokens = text.replace('\n', '').replace(',', '').lower().split()
-    # Remove ':' de labels (ex: "loop:" → "loop")
     if tokens and tokens[0].endswith(':'):
         tokens[0] = tokens[0][:-1]
     if tokens:
@@ -254,7 +263,7 @@ find_names()
 if lines_to_bin_step1():
     resolve_names()
 
-    byte_arr = [0]   # byte 0 reservado (PC inicial = 0 → aponta aqui, depois fetch vai para 1)
+    byte_arr = [0]
     for line in lines_bin:
         for b in line:
             byte_arr.append(b)
@@ -262,4 +271,3 @@ if lines_to_bin_step1():
     fdst = open(str(sys.argv[2]), 'wb')
     fdst.write(bytearray(byte_arr))
     fdst.close()
-
