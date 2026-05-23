@@ -82,3 +82,125 @@ Prioridade sugerida
 5. AND/OR reg-reg    ← complementa item 1
 6. Y = Y - X         ← menor ganho, mas elimina SWAPs pontuais
 A combinação de IF X_ODD + shift-and-add reduz multiplicação de O(N) adições para O(log N) iterações com apenas ~5–6 instruções por bit — impacto direto em fatorial e indiretamente em todos os outros.
+
+
+
+
+
+1. Deficiências e instruções faltando
+🔴 Crítico — sem essas você sofre em quase todo problema
+Não existe X = mem[addr] para Y direto com endereço base+offset
+Todo acesso à memória exige 3 microciclos separados. Sem modo de endereçamento indireto, vetores e arrays são impraticáveis — você não consegue fazer X = mem[R] onde R é um registrador.
+Não existe H = 0, Z1 = 0, Z2 = 0
+Você tem X = 0 (opcode 41) e Y = 0 (opcode 42), mas para zerar H, Z1 ou Z2 você é obrigado a passar por X primeiro:
+asm41          ; X = 0
+68          ; Z1 = X   ← 2 ciclos para fazer o que deveria ser 1
+Não existe desvio IF Z1 <= 0, IF Z1 < 0
+Você implementou IF Z1 == 0 (opcode 85), mas não os outros. Para usar Z1 como contador decrescente que pode ir negativo, você fica sem saída.
+Não existe X = X * Y direto
+Multiplicação exige um loop completo. Aceitável num processador didático, mas significa que exponenciação e fatorial explodem em ciclos.
+Não existe mem[addr] = Z1 ou mem[addr] = Z2
+Se você precisa salvar Z1 na memória (ex: retorno de função), não há instrução direta. Você é forçado a fazer X = Z1 primeiro.
+
+🟡 Importante — causam gambiarras frequentes
+Não existe H = H + 1, H = H - 1
+H é usado como contador em vários programas (inclusive no fib.asm), mas você não pode incrementá-lo/decrementá-lo diretamente — tem que passar por X ou Y.
+Não existe IF X >= 0 GOTO (o inverso de IF X < 0)
+Para comparar x > y você faz X = X - Y e testa sinal, mas precisaria de IF X >= 0 para o caso positivo sem negar o desvio.
+Não existe X = -X (negação) como opcode direto
+A ALU tem -A (control 0b111011) mas não há opcode exposto para isso. Útil para valor absoluto e comparações.
+Não existe CALL / RET
+Sem pilha e sem retorno de subrotina, exponenciação chamando multiplicação (Q8 da sua lista) é impossível de forma limpa — você tem que duplicar código.
+
+🟢 Menor — mas aparecem em problemas específicos
+Não existe rotação de bits (só shift)
+Para popcount (Q6 melhorada) você precisa examinar cada bit — shift funciona, mas rotação seria mais elegante.
+Não existe X = X MOD Y
+MDC de Euclides precisa de módulo. Atualmente você simula com subtração repetida, que é muito mais lento para números grandes.
+
+2. Gargalos de ciclo atuais
+🔴 Gargalo 1 — Todo acesso à memória custa 3 microciclos
+Ciclo N:   PC=PC+1; FETCH       ← busca o operando (endereço)
+Ciclo N+1: MAR=MBR; READ        ← envia endereço e lê
+Ciclo N+2: X = MDR              ← recebe o valor
+Qualquer variável fora de X, Y, H, Z1, Z2 triplica o custo. Com apenas 5 registradores de propósito geral, qualquer problema com mais de 5 variáveis vivas simultaneamente vai bater nesse gargalo.
+🔴 Gargalo 2 — H não tem aritmética própria
+No fib.asm você vê isso claramente:
+asmhtox        ; X = H    ← 1 ciclo
+decx        ; X = X-1  ← 1 ciclo
+xtoh        ; H = X    ← 1 ciclo
+3 ciclos para fazer H = H - 1. Se H tivesse H = H - 1 direto, seriam 1 ciclo — economia de 2 ciclos por iteração de loop, que em fatorial de 10 significa 20 ciclos desperdiçados só nisso.
+🟡 Gargalo 3 — Desvios condicionais custam 2–3 microciclos sempre
+Todo IF X == 0 GOTO consome:
+
+1 ciclo de teste
+1 ciclo para descartar o endereço (quando não desvia) ou
+1 ciclo para executar o desvio (quando desvia)
+
+Em loops apertados isso é inevitável na arquitetura atual, mas é onde a diferença entre IF Z1 == 0 (que você tem) vs ter que usar htox; jz (3 ciclos) aparece.
+🟡 Gargalo 4 — Inicialização de registradores extras custa ciclos duplos
+asm41          ; X = 0    (1 ciclo)
+68          ; Z1 = X   (1 ciclo)
+2 ciclos para zerar Z1, quando deveria ser 1.
+
+3. Melhorias sugeridas por prioridade
+Prioridade 1 — Aritmética direta em H e Z2 (maior retorno, menor esforço)
+São 6 linhas de firmware, padrão idêntico ao que você já fez para Z1:
+python# 88: H = H + 1 — 1 ciclo  (BUS_B=H via BUS_A=H(000), ALU=A+1)
+firmware[88] = 0b1_000000000_000_00111001_00000100_000_000_000
+
+# 89: H = H - 1 — 1 ciclo
+firmware[89] = 0b1_000000000_000_00110110_00000100_000_000_000
+
+# 90: Z2 = Z2 - 1 — 1 ciclo  (BUS_B=Z2(110), WRITE=Z2(000001))
+firmware[90] = 0b1_000000000_000_00110110_00000001_000_000_110
+
+# 91: Z2 = Z2 + 1 — 1 ciclo
+firmware[91] = 0b1_000000000_000_00110101_00000001_000_000_110
+
+# 92: IF Z2 == 0 GOTO addr — 3 ciclos (padrão JAM_Z, BUS_B=Z2)
+firmware[92]  = 0b1_001011101_001_00010100_00000000_000_000_110
+firmware[93]  = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[349] = 0b0_000001001_000_00010100_00000000_000_000_000
+Impacto direto: o loop do fib.asm passa de:
+asmhtox / decx / xtoh   ; 3 ciclos
+para:
+asm89                   ; H = H-1  — 1 ciclo
+Economia de 2 ciclos × N iterações em todo programa que usa H como contador.
+
+Prioridade 2 — Zeros diretos para H, Z1, Z2
+python# 93: H = 0 — 1 ciclo  (ALU=0, WRITE=H(000100))
+firmware[94] = 0b1_000000000_000_00010000_00000100_000_000_000
+
+# 95: Z1 = 0 — 1 ciclo
+firmware[95] = 0b1_000000000_000_00010000_00000010_000_000_000
+
+# 96: Z2 = 0 — 1 ciclo
+firmware[96] = 0b1_000000000_000_00010000_00000001_000_000_000
+
+Prioridade 3 — mem[addr] = Z1 e mem[addr] = Z2
+Padrão idêntico ao opcode 6 (mem[addr] = X) e 22 (mem[addr] = Y):
+python# 97: mem[addr] = Z1 — 3 ciclos
+firmware[97]  = 0b0_001100010_000_00110101_00100000_001_010_001
+firmware[98]  = 0b0_001100011_000_00010100_10000000_000_000_010
+firmware[99]  = 0b0_000000000_000_00010100_01000000_100_000_101
+
+Prioridade 4 — IF X >= 0 GOTO (complemento do IF X < 0)
+JAM_N invertido (JAM=110): desvia quando N=0, ou seja, quando X ≥ 0:
+python# 100: IF X >= 0 GOTO addr — 3 ciclos
+firmware[100] = 0b1_001100101_110_00010100_00000000_000_000_011
+firmware[101] = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[357] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+Prioridade 5 — CALL/RET com pilha simples (habilita subrotinas)
+Essa é a mais trabalhosa, mas habilita exponenciação, MDC e qualquer problema que reutilize código. A ideia é reservar um endereço de memória fixo como "endereço de retorno":
+python# 101: CALL addr — salva PC em mem[255] e desvia
+# Ciclo 101: salva PC em MDR
+firmware[102] = 0b0_001100110_000_00010100_01000000_001_010_001  # MDR=PC, FETCH
+# Ciclo 102: MAR = endereço fixo de retorno (ex: 254); WRITE
+# Ciclo 103: GOTO addr (via MBR)
+Isso exige alguns microciclos extras mas é implementável sem mudar a arquitetura.
+
+Resumo visual
+MelhoriaEsforçoCiclos economizadosH±1, Z2±1, IF Z2==0Baixo (8 linhas firmware)2× iterações de loopZeros diretos H/Z1/Z2Baixíssimo (3 linhas)1 por inicializaçãomem[addr] = Z1/Z2Baixo (6 linhas)2 por salvamentoIF X >= 0Baixo (3 linhas)Elimina negaçõesCALL/RETMédioElimina código duplicadoX MOD Y nativoAltoEnorme no MDC
+As 4 primeiras você implementa em menos de uma hora e já eliminam os principais gargalos para os problemas clássicos de FUP.
