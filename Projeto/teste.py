@@ -279,17 +279,245 @@ firmware[83] = 0b1_000000000_000_00110110_00000010_000_000_101
 firmware[84] = 0b1_000000000_000_00110101_00000010_000_000_101
 
 # 85: IF Z1 == 0 GOTO address — 3 ciclos
+# NEXT_ADDR=86, JAM_Z=001 → when Z=1: MPC = 86|256 = 342  (era 341, bug corrigido)
 firmware[85]  = 0b1_001010110_001_00010100_00000000_000_000_101
 firmware[86]  = 0b0_000000000_000_00110101_00100000_000_010_001
-firmware[341] = 0b0_000001001_000_00010100_00000000_000_000_000
+firmware[342] = 0b0_000001001_000_00010100_00000000_000_000_000
 
 # 87: Z1 = immediate — 2 ciclos
 firmware[87]  = 0b0_010101101_000_00110101_00100000_001_010_001
 firmware[173] = 0b1_000000000_000_00010100_00000010_000_000_010
 
 
-# 255: HALT
+# ==============================================================================
+# PRIORIDADE 1 — Aritmética direta em H e Z2
+# ==============================================================================
+
+# 88: H = H + 1 — 1 ciclo
+# BUS_A=H(000), ALU=A+1(00111001), WRITE=H(00000100), save_flags=1
+firmware[88] = 0b1_000000000_000_00111001_00000100_000_000_000
+
+# 89: H = H - 1 — 1 ciclo
+# BUS_A=H(000), ALU=A-1(00111010) [novo op], WRITE=H(00000100), save_flags=1
+# NOTA: H só existe em BUS_A (não em BUS_B), portanto é necessário A-1 na ALU
+firmware[89] = 0b1_000000000_000_00111010_00000100_000_000_000
+
+# 90: Z2 = Z2 - 1 — 1 ciclo
+# BUS_B=Z2(110), ALU=B-1(00110110), WRITE=Z2(00000001), save_flags=1
+firmware[90] = 0b1_000000000_000_00110110_00000001_000_000_110
+
+# 91: Z2 = Z2 + 1 — 1 ciclo
+# BUS_B=Z2(110), ALU=B+1(00110101), WRITE=Z2(00000001), save_flags=1
+firmware[91] = 0b1_000000000_000_00110101_00000001_000_000_110
+
+# 92: IF Z2 == 0 GOTO address — 3 ciclos
+# NEXT_ADDR=93, JAM_Z=001 → when Z=1: MPC = 93|256 = 349
+# BUS_B=Z2(110), ALU=B(00010100), WRITE=none, save_flags=1
+firmware[92]  = 0b1_001011101_001_00010100_00000000_000_000_110
+firmware[93]  = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[349] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+# ==============================================================================
+# PRIORIDADE 2 — Zeros diretos para H, Z1 e Z2
+# ==============================================================================
+
+# 94: H = 0 — 1 ciclo
+# ALU=0(00010000), WRITE=H(00000100), save_flags=1
+firmware[94] = 0b1_000000000_000_00010000_00000100_000_000_000
+
+# 95: Z1 = 0 — 1 ciclo
+# ALU=0(00010000), WRITE=Z1(00000010), save_flags=1
+firmware[95] = 0b1_000000000_000_00010000_00000010_000_000_000
+
+# 96: Z2 = 0 — 1 ciclo
+# ALU=0(00010000), WRITE=Z2(00000001), save_flags=1
+firmware[96] = 0b1_000000000_000_00010000_00000001_000_000_000
+
+# ==============================================================================
+# PRIORIDADE 3 — mem[addr] = Z1 (padrão idêntico ao opcode 6 / opcode 22)
+# ==============================================================================
+
+# 97: mem[address] = Z1 — 3 ciclos
+# Ciclo 97: PC=PC+1; FETCH; GOTO 98
+firmware[97]  = 0b0_001100010_000_00110101_00100000_001_010_001
+# Ciclo 98: MAR=MBR; GOTO 99
+firmware[98]  = 0b0_001100011_000_00010100_10000000_000_000_010
+# Ciclo 99: MDR=Z1; WRITE_WORD; GOTO 0 — BUS_B=Z1(101), ALU=B, WRITE=MDR(01000000), MEM=WRITE(100)
+firmware[99]  = 0b0_000000000_000_00010100_01000000_100_000_101
+
+# ==============================================================================
+# PRIORIDADE 4 — IF X >= 0 GOTO (complemento do IF X < 0, JAM=110 = inverted N)
+# ==============================================================================
+
+# 100: IF X >= 0 GOTO address — 3 ciclos
+# Desvia quando N=0 (X >= 0): NEXT_ADDR=101, JAM=110 → MPC = 101|(1-N)<<8
+# Se X>=0 (N=0): MPC = 101|256 = 357 → toma o desvio
+# Se X< 0 (N=1): MPC = 101|0   = 101 → descarta endereço
+firmware[100] = 0b1_001100101_110_00010100_00000000_000_000_011
+firmware[101] = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[357] = 0b0_000001001_000_00010100_00000000_000_000_000
 firmware[255] = 0b0_000000000_000_00000000_00000000_000_000_000
+
+# ==============================================================================
+# PRIORIDADE 5 — CALL / RET com registrador de link (Z2)
+#
+# Convenção: Z2 guarda o endereço de retorno após CALL.
+# Para chamadas aninhadas, salve Z2 na memória antes do CALL interno
+# e restaure após o RET. Para FUP de 1 nível (ex: main→multiply), Z2 é livre.
+# Esta abordagem é análoga ao "branch-and-link" de processadores RISC (ARM LR).
+# RET custa apenas 1 microciclo — o menor CALL/RET possível nesta arquitetura.
+# ==============================================================================
+
+# 102: CALL address — 3 ciclos
+# Ciclo 102: PC=PC+1; FETCH; GOTO 103  (busca o byte do endereço-alvo em MBR, PC aponta ao retorno)
+firmware[102] = 0b0_001100111_000_00110101_00100000_001_010_001
+# Ciclo 103: Z2 = PC  (salva endereço de retorno no registrador de link)
+# BUS_B=PC(001), ALU=B(00010100), WRITE=Z2(00000001), save=0, GOTO 104
+firmware[103] = 0b0_001101000_000_00010100_00000001_000_000_001
+# Ciclo 104: PC = MBR; FETCH; GOTO MBR  (desvia para o alvo e despacha)
+# BUS_B=MBR(010), ALU=B, WRITE=PC(00100000), MEM=FETCH(001), JAM=MBR(100)
+firmware[104] = 0b0_000000000_100_00010100_00100000_001_000_010
+
+# 105: RET — 1 ciclo
+# PC = Z2; FETCH; GOTO MBR  (restaura PC do registrador de link e despacha)
+# BUS_B=Z2(110), ALU=B, WRITE=PC(00100000), MEM=FETCH(001), JAM=MBR(100), save=0
+firmware[105] = 0b0_000000000_100_00010100_00100000_001_000_110
+
+# ==============================================================================
+# DESVIOS CONDICIONAIS EM Z1 E H  (gap crítico do documento original)
+# ==============================================================================
+
+# 106: IF Z1 < 0 GOTO address — 3 ciclos
+# NEXT=107, JAM=010(N), BUS_B=Z1(101) → N=1: 107|256=363
+firmware[106] = 0b1_001101011_010_00010100_00000000_000_000_101
+firmware[107] = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[363] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+# 108: IF Z1 <= 0 GOTO address — 3 ciclos
+# NEXT=109, JAM=011(N|Z), BUS_B=Z1(101) → N|Z=1: 109|256=365
+firmware[108] = 0b1_001101101_011_00010100_00000000_000_000_101
+firmware[109] = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[365] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+# 110: IF H == 0 GOTO address — 3 ciclos
+# H só existe em BUS_A → usa ALU=A(011000) em vez de ALU=B
+# NEXT=111, JAM=001(Z), BUS_A=H(000) → Z=1: 111|256=367
+firmware[110] = 0b1_001101111_001_00011000_00000000_000_000_000
+firmware[111] = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[367] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+# 112: IF H < 0 GOTO address — 3 ciclos
+# NEXT=113, JAM=010(N), BUS_A=H(000), ALU=A → N=1: 113|256=369
+firmware[112] = 0b1_001110001_010_00011000_00000000_000_000_000
+firmware[113] = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[369] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+# 114: IF H <= 0 GOTO address — 3 ciclos
+# NEXT=115, JAM=011(N|Z), BUS_A=H(000), ALU=A → N|Z=1: 115|256=371
+firmware[114] = 0b1_001110011_011_00011000_00000000_000_000_000
+firmware[115] = 0b0_000000000_000_00110101_00100000_000_010_001
+firmware[371] = 0b0_000001001_000_00010100_00000000_000_000_000
+
+# ==============================================================================
+# TRANSFERÊNCIAS DIRETAS ENTRE REGISTRADORES TEMPORÁRIOS
+# Eliminam o desvio obrigatório por X ou Y (-2 ciclos cada)
+# ==============================================================================
+
+# 116: Z1 = H — 1 ciclo   (BUS_A=H(000), ALU=A(011000), WRITE=Z1(00000010))
+firmware[116] = 0b0_000000000_000_00011000_00000010_000_000_000
+
+# 117: H = Z1 — 1 ciclo   (BUS_B=Z1(101), ALU=B(00010100), WRITE=H(00000100))
+firmware[117] = 0b0_000000000_000_00010100_00000100_000_000_101
+
+# 118: Z2 = H — 1 ciclo   (BUS_A=H(000), ALU=A(011000), WRITE=Z2(00000001))
+firmware[118] = 0b0_000000000_000_00011000_00000001_000_000_000
+
+# 119: H = Z2 — 1 ciclo   (BUS_B=Z2(110), ALU=B(00010100), WRITE=H(00000100))
+firmware[119] = 0b0_000000000_000_00010100_00000100_000_000_110
+
+# 120: Z2 = Z1 — 1 ciclo   (BUS_B=Z1(101), ALU=B, WRITE=Z2(00000001))
+firmware[120] = 0b0_000000000_000_00010100_00000001_000_000_101
+
+# 121: Z1 = Z2 — 1 ciclo   (BUS_B=Z2(110), ALU=B, WRITE=Z1(00000010))
+firmware[121] = 0b0_000000000_000_00010100_00000010_000_000_110
+
+# ==============================================================================
+# ESCRITA NA MEMÓRIA COM Z2 E ARITMÉTICA DIRETA COM Z1
+# ==============================================================================
+
+# 122: mem[address] = Z2 — 3 ciclos  (simétrico ao opcode 97 para Z1)
+firmware[122] = 0b0_001111011_000_00110101_00100000_001_010_001  # GOTO 123
+firmware[123] = 0b0_001111100_000_00010100_10000000_000_000_010  # MAR=MBR; GOTO 124
+# MDR=Z2; WRITE_WORD; GOTO 0 — BUS_B=Z2(110), WRITE=MDR(01000000), MEM=WRITE(100)
+firmware[124] = 0b0_000000000_000_00010100_01000000_100_000_110
+
+# 125: X = X + Z1 — 1 ciclo   (BUS_A=Z1(110), BUS_B=X(011), ALU=A+B, WRITE=X)
+firmware[125] = 0b1_000000000_000_00111100_00010000_000_110_011
+
+# 126: X = X - Z1 — 1 ciclo   (B-A = X-Z1: BUS_A=Z1(110), BUS_B=X(011), ALU=B-A, WRITE=X)
+firmware[126] = 0b1_000000000_000_00111111_00010000_000_110_011
+
+# 127: Y = Y + Z1 — 1 ciclo   (BUS_A=Z1(110), BUS_B=Y(100), ALU=A+B, WRITE=Y)
+firmware[127] = 0b1_000000000_000_00111100_00001000_000_110_100
+
+# 137: Y = Y - Z1 — 1 ciclo   (B-A = Y-Z1: BUS_A=Z1(110), BUS_B=Y(100), ALU=B-A, WRITE=Y)
+firmware[137] = 0b1_000000000_000_00111111_00001000_000_110_100
+
+# ==============================================================================
+# ENDEREÇAMENTO INDIRETO VIA Z1  (essencial para arrays e ordenação)
+# Permite tratar Z1 como ponteiro — habilita bubble sort, busca linear, etc.
+# ==============================================================================
+
+# 140: X = mem[Z1] — 2 ciclos  (MAR=Z1, READ, X=MDR)
+# BUS_B=Z1(101), ALU=B, WRITE=MAR(10000000), MEM=READ(010), GOTO 141
+firmware[140] = 0b0_010001101_000_00010100_10000000_010_000_101
+# X=MDR; GOTO 0   BUS_B=MDR(000), WRITE=X(00010000), save=1
+firmware[141] = 0b1_000000000_000_00010100_00010000_000_000_000
+
+# 142: Y = mem[Z1] — 2 ciclos
+firmware[142] = 0b0_010001111_000_00010100_10000000_010_000_101
+firmware[143] = 0b1_000000000_000_00010100_00001000_000_000_000  # Y=MDR
+
+# 144: mem[Z1] = X — 2 ciclos  (MAR=Z1, MDR=X, WRITE)
+firmware[144] = 0b0_010010001_000_00010100_10000000_000_000_101  # MAR=Z1; GOTO 145
+# MDR=X; WRITE_WORD; GOTO 0   BUS_B=X(011), WRITE=MDR(01000000), MEM=WRITE(100)
+firmware[145] = 0b0_000000000_000_00010100_01000000_100_000_011
+
+# 146: mem[Z1] = Y — 2 ciclos
+firmware[146] = 0b0_010010011_000_00010100_10000000_000_000_101  # MAR=Z1; GOTO 147
+firmware[147] = 0b0_000000000_000_00010100_01000000_100_000_100  # MDR=Y; WRITE
+
+# ==============================================================================
+# CARGA DIRETA NOS REGISTRADORES TEMPORÁRIOS
+# ==============================================================================
+
+# 148: Z1 = mem[addr] — 3 ciclos
+firmware[148] = 0b0_010010101_000_00110101_00100000_001_010_001  # FETCH; GOTO 149
+firmware[149] = 0b0_010010110_000_00010100_10000000_010_000_010  # MAR=MBR; READ; GOTO 150
+firmware[150] = 0b1_000000000_000_00010100_00000010_000_000_000  # Z1=MDR; GOTO 0
+
+# 151: Z2 = mem[addr] — 3 ciclos
+firmware[151] = 0b0_010011000_000_00110101_00100000_001_010_001  # FETCH; GOTO 152
+firmware[152] = 0b0_010011001_000_00010100_10000000_010_000_010  # MAR=MBR; READ; GOTO 153
+firmware[153] = 0b1_000000000_000_00010100_00000001_000_000_000  # Z2=MDR; GOTO 0
+
+# 154: Z2 = immediate — 2 ciclos  (simétrico ao opcode 87 para Z1)
+firmware[154] = 0b0_010011011_000_00110101_00100000_001_010_001  # FETCH; GOTO 155
+firmware[155] = 0b1_000000000_000_00010100_00000001_000_000_010  # Z2=MBR; GOTO 0
+
+# 156: H = immediate — 2 ciclos
+firmware[156] = 0b0_010011101_000_00110101_00100000_001_010_001  # FETCH; GOTO 157
+firmware[157] = 0b0_000000000_000_00010100_00000100_000_000_010  # H=MBR; GOTO 0
+
+# ==============================================================================
+# CÁLCULO DIRETO EM Z1  (preserva X e Y intactos durante contas intermediárias)
+# ==============================================================================
+
+# 158: Z1 = X + Y — 1 ciclo   (BUS_A=Y(101), BUS_B=X(011), ALU=A+B, WRITE=Z1)
+firmware[158] = 0b1_000000000_000_00111100_00000010_000_101_011
+
+# 159: Z1 = X - Y — 1 ciclo   (B-A = X-Y: BUS_A=Y(101), BUS_B=X(011), ALU=B-A, WRITE=Z1)
+firmware[159] = 0b1_000000000_000_00111111_00000010_000_101_011
 
 def read_regs(reg_num):
    global MDR, PC, MBR, X, Y, H, BUS_A, BUS_B, Z1, Z2
@@ -397,6 +625,8 @@ def alu(control_bits, save_flags):
       o = a & 1                                    # A & 1
    elif control_bits == 0b000010:
       o = a ^ b                                    # A XOR B
+   elif control_bits == 0b111010:                                               # A - 1  (necessário para H=H-1, pois H só existe em BUS_A)
+      o = a - 1
    elif control_bits == 0b000011:                                               # |A|
       o = a
       if not (a & 0x80000000):
