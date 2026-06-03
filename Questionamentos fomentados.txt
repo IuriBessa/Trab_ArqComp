@@ -1,206 +1,27 @@
 Questionamentos principais:
-**É interessante implementar a multiplicação no firmware usando menos codigo (vr como isso seria possivel)
-**É interessante implementar divisão com resto no código
-**É interessante impplementar a alu dupla e ver quais mudanças podem ser feitas nos firmwares para reduzir o ciclo de clock.
-**ver quais firmwares podem ser melhorados com a adicao de Z1 e Z2
-**Ver possibilidade de implementar algo parecido com potenciação
+1 — Busca de operandos sem paralelismo
+Sequências como X = mem[addr] precisam de 2 microciclos: um para MAR←MBR e outro para X←MDR. A ALU2 poderia calcular MAR enquanto a ALU1 incrementa PC, mas os opcodes atuais (ex: fw[40], fw[2]) já fazem isso — porém a escrita do resultado final em X/Y sempre fica para um microciclo separado porque READ só ocorre após ALU2.
 
+Oportunidade: encadear a leitura diretamente no passo de incremento do PC para que READ já produza MDR no mesmo ciclo em que MAR foi setado.
 
-  
-1.Criar um IR otimizaria o processador descobrecarregando o MBR? (g) EXPPLIÇÃO MAIOR ABAIXO.
-4.Cada micro-instrução de "buscar e executar" uma instrução custa vários ciclos. Por exemplo,add precisa de 4 micro-instruções (ciclos 2, 3, 4 e 5).
-isso é chamado de "latência" algumas dessas etapas poderiam ser fundidas — por exemplo, 
-ler a memória e carregar H em um único passo — reduzindo add de 4 para 3 ciclos. Isso seria implementar um ir?, como fazer isso na pratica p fundir (c)
-o próprio MIR costuma ter um pedaço (alguns bits) dedicado exclusivamente a dizer qual é o próximo endereço padrão ou para onde pular.
-Implementar no firmware DESLCAMENTO, MULTIPLICAÇÃO DIVISÃO.
+2 — Branches condicionais gastam 2+ ciclos extras
+Todo branch (opcodes 11, 18, 43, 57, 59…) segue o padrão: ciclo de eval flags → ciclo de fetch addr → ciclo de goto. O firmware[11] salva flags, depois fw[12] busca o operando MBR=addr, e fw[268] faz o salto real. São 3 microciclos por branch.
 
+Oportunidade: usar ALU2 para calcular o alvo do salto (PC←MBR) enquanto ALU1 ainda avalia a condição — colapsando para 2 microciclos.
 
+3 — Loop de divisão/módulo implementado em software
+Divisão e módulo (necessários para fatoração prima e soma de divisores) não existem no ISA. São emulados por subtração repetida, gastando O(N) ciclos por operação. Para um valor de entrada como 42, o cálculo de 42 mod 7 subtrai 7 seis vezes.
 
-Questionamentos 2:
-Você tem apenas X, Y, H visíveis para o programador. H é só rascunho interno. Na prática o assembler tem 2 registradores de propósito geral.
-Impacto: Força uso de memória para guardar temporários, custando 2–3 ciclos por acesso (MAR, READ/WRITE, MDR).
-Solução: Adicionar registradores, por exemplo Z1, Z2 (evitando conflito com seu flag Z). No layout do MIR você tem 3 bits para BUS_A e 3 bits para BUS_B — isso suporta até 8 fontes cada, e hoje você só usa 6. Sobram 2 slots livres em cada barramento.
+Oportunidade: adicionar opcode de divisão por shifts + subtração condicional usando ALU2 para shifts e ALU1 para a subtração em paralelo — reduz para O(log N) ciclos.
 
+4 — ALU2 subutilizada nos loops de teste
+Nos loops que testam divisibilidade (X mod D == 0), a ALU2 fica ociosa enquanto ALU1 faz a subtração. Ela poderia estar calculando D+1 (próximo divisor a testar) em paralelo, eliminando um microciclo de incremento por iteração.
 
-  Quem está fazendo o papel do IR, de forma adaptada, é o MBR (Memory Byte Buffer Register).
+opcode 17 (X−1) desnecessário se ALU2 fizer D+1
+economia: ~1 ciclo por iteração de loop
 
-Vou te explicar exatamente o porquê disso estar acontecendo e como o seu circuito funciona:
+5 — Acumulação de soma exige leitura+escrita separadas
+X = X + mem[addr] (opcode 2) usa 2 microciclos. Para o algoritmo de soma de fatores, isso é executado toda vez que um fator primo é encontrado. Com ALU2 calculando a leitura do próximo fator em paralelo à escrita do acumulador, o par de microciclos poderia ser reduzido para 1 em casos encadeados.
 
-Por que o MBR virou o "IR"?
-Em um processador completo e maior, o fluxo normal seria:
-
-Buscar o opcode na memória usando o endereço do PC.
-
-Jogar esse dado no MBR.
-
-Copiar o conteúdo do MBR para o IR.
-
-A Unidade de Controle lê o IR para decidir qual microprograma rodar.
-
-Porém, como este modelo é uma simplificação didática baseada em instruções de 1 byte de opcode (como dá para ver no seu firmware[0] e firmware[10]), os projetistas cortaram caminho para economizar hardware (e código). O valor do opcode lido da memória RAM fica guardado diretamente no MBR e é consumido dali mesmo!
-
-A prova disso no seu próprio código
-Destaquei duas partes do seu código onde o MBR age exatamente como se fosse o IR (guardando a macro-instrução para decidir o desvio do firmware):
-
-1. Na instrução de FETCH (firmware[0])
-Python
-# 0: INIT
-firmware[0] = 0b000000000_100_00110101_001000_001_001 
-# BUS_C = PC + 1; PC = BUS_C; MBR = memory.read_byte(PC) (FETCH); GOTO MBR.
-Aqui, o processador lê a próxima macro-instrução do usuário e joga no MBR. Logo em seguida, ele faz um GOTO MBR. Pular para o valor que está no MBR significa usar o opcode guardado nele para indexar o firmware (ex: se o programa do usuário leu 2, o MPC vai saltar direto para o firmware[2]). Isso é pura decodificação de instrução, o papel clássico do IR!
-
-2. Na função next_instruction
-Python
-if jam & 0b100:
-    nextadd = nextadd | MBR
-O bit de JAMN (ou JMPC) ativa essa linha. Ela faz um OR binário entre o endereço base e o conteúdo do MBR para forçar o MPC a ir para a linha do firmware correspondente à instrução que o usuário mandou rodar.
-
-Resumo da ópera
-Neste computador que você está emulando:
-
-O MBR tem dupla identidade: ele serve tanto para segurar os dados temporários que vêm da memória quanto para segurar o Opcode da Macro-instrução atual.
-
-Portanto, o MBR e o IR são o mesmo registrador na prática.
-
-
-
-3. CALL / RET com pilha simples
-Impacto: fatorial (sub-rotina de multiplicação)
-Sem CALL/RET, você precisa replicar o código de multiplicação inline para cada uso. Bastariam 2 novas instruções:
-
-CALL addr — salva PC em H (ou posição fixa de memória), salta
-RET — restaura PC de H
-
-Com isso, a sub-rotina de multiplicação é escrita uma vez e o fatorial a chama em loop.
-
-
-Prioridade sugerida
-1. IF X_ODD          ← desbloqueador da multiplicação eficiente
-2. Imediatos (MBR)   ← reduz 3→1 ciclo em cargas de constante
-3. CALL/RET          ← fatorial sem código duplicado
-4. Branches para Y   ← economiza SWAPs em Fibonacci
-5. AND/OR reg-reg    ← complementa item 1
-6. Y = Y - X         ← menor ganho, mas elimina SWAPs pontuais
-A combinação de IF X_ODD + shift-and-add reduz multiplicação de O(N) adições para O(log N) iterações com apenas ~5–6 instruções por bit — impacto direto em fatorial e indiretamente em todos os outros.
-
-
-
-
-
-1. Deficiências e instruções faltando
-🔴 Crítico — sem essas você sofre em quase todo problema
-Não existe X = mem[addr] para Y direto com endereço base+offset
-Todo acesso à memória exige 3 microciclos separados. Sem modo de endereçamento indireto, vetores e arrays são impraticáveis — você não consegue fazer X = mem[R] onde R é um registrador.
-Não existe H = 0, Z1 = 0, Z2 = 0
-Você tem X = 0 (opcode 41) e Y = 0 (opcode 42), mas para zerar H, Z1 ou Z2 você é obrigado a passar por X primeiro:
-asm41          ; X = 0
-68          ; Z1 = X   ← 2 ciclos para fazer o que deveria ser 1
-Não existe desvio IF Z1 <= 0, IF Z1 < 0
-Você implementou IF Z1 == 0 (opcode 85), mas não os outros. Para usar Z1 como contador decrescente que pode ir negativo, você fica sem saída.
-Não existe X = X * Y direto
-Multiplicação exige um loop completo. Aceitável num processador didático, mas significa que exponenciação e fatorial explodem em ciclos.
-Não existe mem[addr] = Z1 ou mem[addr] = Z2
-Se você precisa salvar Z1 na memória (ex: retorno de função), não há instrução direta. Você é forçado a fazer X = Z1 primeiro.
-
-🟡 Importante — causam gambiarras frequentes
-Não existe H = H + 1, H = H - 1
-H é usado como contador em vários programas (inclusive no fib.asm), mas você não pode incrementá-lo/decrementá-lo diretamente — tem que passar por X ou Y.
-Não existe IF X >= 0 GOTO (o inverso de IF X < 0)
-Para comparar x > y você faz X = X - Y e testa sinal, mas precisaria de IF X >= 0 para o caso positivo sem negar o desvio.
-Não existe X = -X (negação) como opcode direto
-A ALU tem -A (control 0b111011) mas não há opcode exposto para isso. Útil para valor absoluto e comparações.
-Não existe CALL / RET
-Sem pilha e sem retorno de subrotina, exponenciação chamando multiplicação (Q8 da sua lista) é impossível de forma limpa — você tem que duplicar código.
-
-🟢 Menor — mas aparecem em problemas específicos
-Não existe rotação de bits (só shift)
-Para popcount (Q6 melhorada) você precisa examinar cada bit — shift funciona, mas rotação seria mais elegante.
-Não existe X = X MOD Y
-MDC de Euclides precisa de módulo. Atualmente você simula com subtração repetida, que é muito mais lento para números grandes.
-
-2. Gargalos de ciclo atuais
-🔴 Gargalo 1 — Todo acesso à memória custa 3 microciclos
-Ciclo N:   PC=PC+1; FETCH       ← busca o operando (endereço)
-Ciclo N+1: MAR=MBR; READ        ← envia endereço e lê
-Ciclo N+2: X = MDR              ← recebe o valor
-Qualquer variável fora de X, Y, H, Z1, Z2 triplica o custo. Com apenas 5 registradores de propósito geral, qualquer problema com mais de 5 variáveis vivas simultaneamente vai bater nesse gargalo.
-🔴 Gargalo 2 — H não tem aritmética própria
-No fib.asm você vê isso claramente:
-asmhtox        ; X = H    ← 1 ciclo
-decx        ; X = X-1  ← 1 ciclo
-xtoh        ; H = X    ← 1 ciclo
-3 ciclos para fazer H = H - 1. Se H tivesse H = H - 1 direto, seriam 1 ciclo — economia de 2 ciclos por iteração de loop, que em fatorial de 10 significa 20 ciclos desperdiçados só nisso.
-🟡 Gargalo 3 — Desvios condicionais custam 2–3 microciclos sempre
-Todo IF X == 0 GOTO consome:
-
-1 ciclo de teste
-1 ciclo para descartar o endereço (quando não desvia) ou
-1 ciclo para executar o desvio (quando desvia)
-
-Em loops apertados isso é inevitável na arquitetura atual, mas é onde a diferença entre IF Z1 == 0 (que você tem) vs ter que usar htox; jz (3 ciclos) aparece.
-🟡 Gargalo 4 — Inicialização de registradores extras custa ciclos duplos
-asm41          ; X = 0    (1 ciclo)
-68          ; Z1 = X   (1 ciclo)
-2 ciclos para zerar Z1, quando deveria ser 1.
-
-3. Melhorias sugeridas por prioridade
-Prioridade 1 — Aritmética direta em H e Z2 (maior retorno, menor esforço)
-São 6 linhas de firmware, padrão idêntico ao que você já fez para Z1:
-python# 88: H = H + 1 — 1 ciclo  (BUS_B=H via BUS_A=H(000), ALU=A+1)
-firmware[88] = 0b1_000000000_000_00111001_00000100_000_000_000
-
-# 89: H = H - 1 — 1 ciclo
-firmware[89] = 0b1_000000000_000_00110110_00000100_000_000_000
-
-# 90: Z2 = Z2 - 1 — 1 ciclo  (BUS_B=Z2(110), WRITE=Z2(000001))
-firmware[90] = 0b1_000000000_000_00110110_00000001_000_000_110
-
-# 91: Z2 = Z2 + 1 — 1 ciclo
-firmware[91] = 0b1_000000000_000_00110101_00000001_000_000_110
-
-# 92: IF Z2 == 0 GOTO addr — 3 ciclos (padrão JAM_Z, BUS_B=Z2)
-firmware[92]  = 0b1_001011101_001_00010100_00000000_000_000_110
-firmware[93]  = 0b0_000000000_000_00110101_00100000_000_010_001
-firmware[349] = 0b0_000001001_000_00010100_00000000_000_000_000
-Impacto direto: o loop do fib.asm passa de:
-asmhtox / decx / xtoh   ; 3 ciclos
-para:
-asm89                   ; H = H-1  — 1 ciclo
-Economia de 2 ciclos × N iterações em todo programa que usa H como contador.
-
-Prioridade 2 — Zeros diretos para H, Z1, Z2
-python# 93: H = 0 — 1 ciclo  (ALU=0, WRITE=H(000100))
-firmware[94] = 0b1_000000000_000_00010000_00000100_000_000_000
-
-# 95: Z1 = 0 — 1 ciclo
-firmware[95] = 0b1_000000000_000_00010000_00000010_000_000_000
-
-# 96: Z2 = 0 — 1 ciclo
-firmware[96] = 0b1_000000000_000_00010000_00000001_000_000_000
-
-Prioridade 3 — mem[addr] = Z1 e mem[addr] = Z2
-Padrão idêntico ao opcode 6 (mem[addr] = X) e 22 (mem[addr] = Y):
-python# 97: mem[addr] = Z1 — 3 ciclos
-firmware[97]  = 0b0_001100010_000_00110101_00100000_001_010_001
-firmware[98]  = 0b0_001100011_000_00010100_10000000_000_000_010
-firmware[99]  = 0b0_000000000_000_00010100_01000000_100_000_101
-
-Prioridade 4 — IF X >= 0 GOTO (complemento do IF X < 0)
-JAM_N invertido (JAM=110): desvia quando N=0, ou seja, quando X ≥ 0:
-python# 100: IF X >= 0 GOTO addr — 3 ciclos
-firmware[100] = 0b1_001100101_110_00010100_00000000_000_000_011
-firmware[101] = 0b0_000000000_000_00110101_00100000_000_010_001
-firmware[357] = 0b0_000001001_000_00010100_00000000_000_000_000
-
-Prioridade 5 — CALL/RET com pilha simples (habilita subrotinas)
-Essa é a mais trabalhosa, mas habilita exponenciação, MDC e qualquer problema que reutilize código. A ideia é reservar um endereço de memória fixo como "endereço de retorno":
-python# 101: CALL addr — salva PC em mem[255] e desvia
-# Ciclo 101: salva PC em MDR
-firmware[102] = 0b0_001100110_000_00010100_01000000_001_010_001  # MDR=PC, FETCH
-# Ciclo 102: MAR = endereço fixo de retorno (ex: 254); WRITE
-# Ciclo 103: GOTO addr (via MBR)
-Isso exige alguns microciclos extras mas é implementável sem mudar a arquitetura.
-
-Resumo visual
-MelhoriaEsforçoCiclos economizadosH±1, Z2±1, IF Z2==0Baixo (8 linhas firmware)2× iterações de loopZeros diretos H/Z1/Z2Baixíssimo (3 linhas)1 por inicializaçãomem[addr] = Z1/Z2Baixo (6 linhas)2 por salvamentoIF X >= 0Baixo (3 linhas)Elimina negaçõesCALL/RETMédioElimina código duplicadoX MOD Y nativoAltoEnorme no MDC
-As 4 primeiras você implementa em menos de uma hora e já eliminam os principais gargalos para os problemas clássicos de FUP.
+6 — Falta opcode de teste de paridade sem custo extra
+O opcode 76 (IF X odd GOTO) existe, mas verifica paridade em 3 microciclos (AND 1 → flags → branch). A estrutura do problema exige um teste de paridade logo no início. ALU2 poderia fazer X & 1 enquanto ALU1 faz o fetch, e o JAM poderia usar o resultado diretamente.
