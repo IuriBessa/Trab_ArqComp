@@ -99,3 +99,94 @@ for bit in 0..7:
 A dependência crítica aqui é B >>= 1 → teste do próximo LSB. Mas A <<= 1 é independente do resultado do teste — ALU2 pode fazer o shift de A enquanto ALU1 faz a soma condicional acc += A (usando o snapshot de A pré-shift). E depois, ALU2 pode fazer B >>= 1 enquanto ALU1 atualiza o acumulador. Isso colapsa 3 operações por iteração para 1 ciclo efetivo usando o paralelismo snapshot da arquitetura.
 O opcode 76 como atalho crítico
 IF X odd GOTO addr (fw[76]) já faz X & 1 + test + branch em uma instrução com JAM=101. Se B for mantido em X durante o loop de multiplicação, cada iteração usa apenas esse opcode para testar o LSB — sem precisar de um AND separado, sem ciclo extra de avaliação de flags.
+
+
+
+
+
+
+
+
+
+
+
+Sem instrução de divisão nativa — usa opcode 163 (shift-and-subtract O(log N)) para cada candidato a fator
+crítico
+→ fatoração de N exige O(√N) tentativas × O(log N) ciclos cada = O(√N · log N) microciclos totais
+Sem instrução de módulo (resto) inline — opcode 164 é separado e igualmente custoso
+crítico
+→ cada teste "N % p == 0" custa 1 chamada ao opcode 164 + branch condicional
+Apenas 2 registradores de uso geral (X, Y) + auxiliares (H, Z1, Z2) — loop de fatoração precisa manter N, p, soma simultaneamente
+médio
+→ necessário usar Z1/Z2 como "variáveis extras"; salvar/restaurar via mem[addr] se precisar de mais
+
+
+
+Teste de primalidade exige O(√N) divisões por tentativa, cada uma custando O(log N) ciclos via opcode 164
+crítico
+→ encontrar o "próximo primo" acima de N pode exigir múltiplas rodadas de teste
+Dupla iteração: primeiro acha o próximo primo (loop externo), depois soma divisores (loop interno) — dois O(√N · log N) encadeados
+crítico
+Pressão sobre registradores aumenta: precisa guardar N original, candidato a primo, e acumulador de soma ao mesmo tempo
+
+Extração de cada byte de 8 bits exige opcode 165/166 (X>>8) + AND com 0xFF — 2–3 microciclos por byte
+médio
+→ 4 bytes por palavra × 2 palavras = 8 extrações no total
+Multiplicação de dois bytes usa opcode 162 (shift-and-add, O(log N) iterações na microarquitetura)
+crítico
+→ 4 multiplicações de 8 bits cada; worst case ~8 iterações × ~4 microciclos = ~32 ciclos por multiplicação
+Sem instrução de multiplicação de 8 bits dedicada — opcode 162 é de 32 bits completos
+médio
+→ funciona, mas desperdiça ciclos em bits de sinal desnecessários para operandos de 8 bits
+
+Extrair e reempacotar 4 bytes em registradores de 32 bits exige sequências de SHL/SHR/AND — sem instrução de "pack/unpack" nativa
+crítico
+→ cada reposicionamento de byte custa 2–4 microciclos (extrai, desloca para posição correta, OR com os demais)
+Comparação entre bytes requer extração prévia (shift+AND) antes de um branch condicional — não há "compare bytes in-word"
+médio
+SWAP X,Y (opcode 48) em snapshot semântico ajuda a trocar dois registradores sem variável temporária — 1 microciclo
+ok
+Apenas 2 registradores principais (X, Y): manter 4 valores simultaneamente força uso de mem[] como "pilha" de bytes temporários
+crítico
+→ acessos à memória adicionam latência (READ = 1 ciclo extra por acesso)
+Bubble sort de 4 elementos = 6 comparações máximo — o custo de extract+compare domina sobre o número de comparações
+
+
+
+Problema: div/mod em software — O(log N) ciclos por operação
+Os opcodes 163 e 164 implementam divisão via shift-and-subtract em microprograma. Para N=10⁶, fatoração exige ~1000 chamadas × ~20 ciclos = 20.000 microciclos só para divisão.
+Solução 1 — instrução DIV/MOD com restoring division na ALU1
+Novo opcode: DIV_HW (X, Y → quociente em X, resto em H)
+Adicionar um combinador de divisão de 1 microciclo na ALU1. Para inteiros de 32 bits com divisor fixo, a ALU1 pode executar restoring division em hardware em vez de loop de microprograma.
+ALU1_DIV = 0b11000000 # novo encoding
+fw[163_new] = ALU1 DIV # X = X // Y, H = X % Y
+fw[164_new] = fw[163_new] + write H→X # X = resto
+Requer adicionar um divisor combinacional ao datapath da ALU1. Latência de hardware: ~1 microciclo (vs. 15–25 atuais).
+
+ALU1 calcula quociente, ALU2 calcula resto no mesmo microciclo
+Sem modificar o datapath, usar a ALU dupla para que um único microciclo produza ambos os resultados. Hoje eles custam 2 chamadas separadas ao microprograma.
+_dual(ALU2_DIV_MOD, a2=A2_X, b2=B2_Y, w2=W2_H)
+# ALU1: X = X // Y
+# ALU2: H = X % Y (mesmo ciclo)
+Exige que a ALU2 suporte o encoding de divisão. Ganho: elimina a segunda chamada de microprograma para módulo.
+
+Um único slot de firmware retorna X=quociente, H=resto
+Sem nenhuma mudança de hardware, reorganizar o microprograma do opcode 163 para já escrever o resto em H ao final do loop. Economiza a segunda chamada completa ao opcode 164 nos casos que precisam de ambos.
+
+DIV/MOD em hardware (ALU1)
+Divisor combinacional no datapath	hardware	20× (20→1 ciclo)	1, 2, 3, 4
+MUL 16×16 bits em hardware
+Multiplicador combinacional ALU1	hardware	128× (128→1 ciclo)	3 (produto escalar)
+BEXT / BINS (byte lanes)
+Novos encodings na ALU1	hardware	2–3× por extração	3, 4
+Banco de registradores R0–R3
+Expandir BUS_A/B para 4 bits	hardware	Elimina acesso a mem[]; depende do algoritmo	1, 2, 4
+DIVMOD combinado (um opcode)
+Só firmware — sem hardware novo	firmware	~1.5× quando ambos são necessários	1, 2
+MAC via ALU dupla (mul+acum)
+Estender ALU2 com encoding MUL	firmware	2× no produto escalar	3
+PUSH/POP sobre Z1/Z2
+Novos opcodes de firmware, sem hw	firmware	Elimina 1–2 acessos mem[] por iteração	1, 2
+Estratégia mem[] como array de bytes
+Algoritmo — sem mudança de hw/fw	algoritmo	Simplifica controle; não reduz ciclos brutos
+
