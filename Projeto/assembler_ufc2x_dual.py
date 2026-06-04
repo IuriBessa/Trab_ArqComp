@@ -29,7 +29,11 @@ no_op_instructions = {
     'xorxy'   : 79,  'absx'    : 80,
     'shlx'    : 31,  'shrx'    : 32,
     'shly'    : 49,  'shry'    : 50,
+    'shrx8'   : 165, 'shry8'   : 166,   # X >>= 8 / Y >>= 8 (extracao de byte)
     'swap'    : 48,
+    'mulxy'   : 162,                  # X = X * Y   (destroi Y e H)
+    'divxy'   : 163,                  # X = X // Y  (destroi H; Y > 0)
+    'modxy'   : 164,                  # X = X % Y   (Y > 0)
     'ytox'    : 20,  'xtoy'    : 21,
     'xtoh'    : 53,  'htox'    : 54,
     'ytoh'    : 55,  'htoy'    : 56,
@@ -76,6 +80,7 @@ jmp_instructions = {
 imm_instructions = {
     'ldxi'  : 66,   'ldyi'  : 67,
     'ldz1i' : 87,   'ldz2i' : 154,  'ldhi' : 156,
+    'andxi' : 160,                  # X = X AND imm
 }
 
 all_keywords = (
