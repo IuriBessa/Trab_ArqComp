@@ -34,11 +34,6 @@ no_op_instructions = {
     'mulxy'   : 162,                  # X = X * Y   (destroi Y e H)
     'divxy'   : 163,                  # X = X // Y  (destroi H; Y > 0)
     'modxy'   : 164,                  # X = X % Y   (Y > 0)
-    'mulxyh'  : 167,                  # X = X * Y   (1 ciclo; Y preservado)
-    'divxyh'  : 168,                  # X = X // Y  (1 ciclo; Y preservado, Y>0)
-    'modxyh'  : 169,                  # X = X % Y   (1 ciclo; Y preservado, Y>0)
-    'divmod'  : 170,                  # X = X//Y e H = X%Y (1 ciclo; Y>0)
-    'bpackx'  : 173,                  # X = (X<<8) | (Y & 0xFF)  (empacota byte)
     'ytox'    : 20,  'xtoy'    : 21,
     'xtoh'    : 53,  'htox'    : 54,
     'ytoh'    : 55,  'htoy'    : 56,
@@ -86,8 +81,6 @@ imm_instructions = {
     'ldxi'  : 66,   'ldyi'  : 67,
     'ldz1i' : 87,   'ldz2i' : 154,  'ldhi' : 156,
     'andxi' : 160,                  # X = X AND imm
-    'bextx' : 171,                  # X = byte[imm] de X  (imm = 0..3)
-    'bexty' : 172,                  # Y = byte[imm] de Y  (imm = 0..3)
 }
 
 all_keywords = (

@@ -56,11 +56,6 @@ ALU2_AaB  = 0b00001100   # A & B   (AND imediato: X & MBR)
 ALU2_Bshl = 0b01010100   # B << 1  (shift left na ALU2)
 ALU2_Ashl = 0b01011000   # A << 1  (shift left de H na ALU2)
 ALU2_Ashr = 0b10011000   # A >> 1  (shift right de H na ALU2)
-ALU2_MUL  = 0b00000101   # A * B                       (multiplicador 1 ciclo)
-ALU2_DIV  = 0b00000110   # A // B                      (divisor 1 ciclo)
-ALU2_MOD  = 0b00000111   # A % B                       (resto 1 ciclo)
-ALU2_BEXT = 0b00001000   # (A >> 8*(B&3)) & 0xFF       (byte extract)
-ALU2_BINS = 0b00001001   # (A << 8) | (B & 0xFF)       (byte pack/append)
 
 
 def _dual(alu2=ALU2_B, a2=A2_MBR, b2=B2_MBR, w2=W2_NONE, sf2=0):
@@ -316,6 +311,7 @@ firmware[99] = 0b0_000000000_000_00010100_01000000_100_000_101
 # ---- opcode 100: IF X >= 0 GOTO addr ---- (2 microciclos)
 firmware[100] = _branch(0b110, ALU2_B, b2=B2_X)
 
+firmware[255] = 0b0_000000000_000_00000000_00000000_000_000_000
 
 # ---- opcode 102: CALL addr ----
 # ALU1: PC++, FETCH MBR=addr ; ALU2: Z2 = PC_snap + 1 (= endereço do byte addr)
@@ -501,54 +497,6 @@ firmware[247] = (
 firmware[497] = 0b0_000000000_000_00010100_00010000_000_000_011   # X = R (ja em X) ; goto 0
 firmware[503] = 0b0_000000000_000_00010100_00010000_000_000_011   # X = R (ja em X) ; goto 0
 
-firmware[255] = 0b0_000000000_000_00000000_00000000_000_000_000
-
-# ============================================================================
-# OPCODES "HARDWARE" DE 1 MICROCICLO  (combinadores na ALU — #3, #8, #12)
-# ----------------------------------------------------------------------------
-# Substituem os loops O(log N) por combinadores de 1 ciclo. Os opcodes antigos
-# 162 (mul), 163 (div) e 164 (mod) sao mantidos intactos. Diferente deles, estes
-# NAO destroem Y nem usam Z1/Z2: a ALU1 le X e Y e escreve so X.
-# Semantica unsigned de 32 bits; divisao por 0 retorna 0.
-
-# ---- opcode 167: X = X * Y  (multiplicador combinacional) ----
-firmware[167] = 0b1_000000000_000_00000101_00010000_000_100_100
-
-# ---- opcode 168: X = X // Y  (divisor combinacional; Y > 0) ----
-firmware[168] = 0b1_000000000_000_00000110_00010000_000_100_100
-
-# ---- opcode 169: X = X % Y  (resto combinacional; Y > 0) ----
-firmware[169] = 0b1_000000000_000_00000111_00010000_000_100_100
-
-# ---- opcode 170: X = X // Y  E  H = X % Y  no MESMO microciclo (ALU dupla) ----
-# ALU1 escreve o quociente em X; a ALU2 usa o SNAPSHOT de X/Y pre-ALU1 para o
-# resto, logo H = X_orig % Y_orig (e nao quociente % Y). Y preservado.
-firmware[170] = (
-    0b1_000000000_000_00000110_00010000_000_100_100
-    | _dual(ALU2_MOD, A2_X, B2_Y, W2_H)
-)
-
-# ============================================================================
-# BYTE LANES — BEXT / BINS  (extracao/empacotamento de bytes — #13)
-# ----------------------------------------------------------------------------
-# bextx/bexty imm : extraem o byte de indice imm (0..3) de X/Y em 1 microciclo,
-#   substituindo a sequencia shrx8 + andxi 0xFF e permitindo qualquer posicao.
-#   A ALU1 faz PC++/FETCH (MBR=imm) enquanto a ALU2 calcula (reg >> 8*imm)&0xFF.
-# bpackx : anexa o byte baixo de Y a X -> X = (X<<8) | (Y & 0xFF). Primitiva de
-#   empacotamento (inverso do bext): zera, e para cada byte faz bpackx.
-
-# ---- opcode 171: X = byte[imm] de X  =  (X >> 8*imm) & 0xFF ----
-firmware[171] = (
-    0b0_000000000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_BEXT, A2_X, B2_MBR, W2_X, sf2=1)
-)
-# ---- opcode 172: Y = byte[imm] de Y  =  (Y >> 8*imm) & 0xFF ----
-firmware[172] = (
-    0b0_000000000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_BEXT, A2_Y, B2_MBR, W2_Y, sf2=1)
-)
-# ---- opcode 173: X = (X << 8) | (Y & 0xFF)  (empacota byte de Y em X) ----
-firmware[173] = 0b1_000000000_000_00001001_00010000_000_100_100
 
 # ============================================================================
 # FUNÇÕES
@@ -585,105 +533,6 @@ def write_regs2(w2, val):
     elif w2 == W2_PC:  PC  = val
 
 
-# ----------------------------------------------------------------------------
-# COMBINADORES DE MUL / DIV (sem laco, sem '*'/'/'/'%', sem relacionais).
-# Modelam o hardware: o multiplicador e um array de 32 somadores de produtos
-# parciais; o divisor sao 32 estagios de divisao restauradora desenrolados.
-# ----------------------------------------------------------------------------
-def _mul32(a, b):
-    # Soma dos produtos parciais: para cada bit i de b, soma (a<<i) mascarado.
-    # -((b>>i)&1) vale 0 (bit zero) ou -1 (= todos-1, bit um), funcionando como
-    # mascara AND. So usa +, deslocamentos, AND e negacao unaria.
-    a &= 0xFFFFFFFF
-    b &= 0xFFFFFFFF
-    p  = (a       ) & -( b        & 1)
-    p += (a <<  1) & -((b >>  1) & 1)
-    p += (a <<  2) & -((b >>  2) & 1)
-    p += (a <<  3) & -((b >>  3) & 1)
-    p += (a <<  4) & -((b >>  4) & 1)
-    p += (a <<  5) & -((b >>  5) & 1)
-    p += (a <<  6) & -((b >>  6) & 1)
-    p += (a <<  7) & -((b >>  7) & 1)
-    p += (a <<  8) & -((b >>  8) & 1)
-    p += (a <<  9) & -((b >>  9) & 1)
-    p += (a << 10) & -((b >> 10) & 1)
-    p += (a << 11) & -((b >> 11) & 1)
-    p += (a << 12) & -((b >> 12) & 1)
-    p += (a << 13) & -((b >> 13) & 1)
-    p += (a << 14) & -((b >> 14) & 1)
-    p += (a << 15) & -((b >> 15) & 1)
-    p += (a << 16) & -((b >> 16) & 1)
-    p += (a << 17) & -((b >> 17) & 1)
-    p += (a << 18) & -((b >> 18) & 1)
-    p += (a << 19) & -((b >> 19) & 1)
-    p += (a << 20) & -((b >> 20) & 1)
-    p += (a << 21) & -((b >> 21) & 1)
-    p += (a << 22) & -((b >> 22) & 1)
-    p += (a << 23) & -((b >> 23) & 1)
-    p += (a << 24) & -((b >> 24) & 1)
-    p += (a << 25) & -((b >> 25) & 1)
-    p += (a << 26) & -((b >> 26) & 1)
-    p += (a << 27) & -((b >> 27) & 1)
-    p += (a << 28) & -((b >> 28) & 1)
-    p += (a << 29) & -((b >> 29) & 1)
-    p += (a << 30) & -((b >> 30) & 1)
-    p += (a << 31) & -((b >> 31) & 1)
-    return p & 0xFFFFFFFF
-
-
-def _divstep(q, r, bit, b):
-    # Um estagio da divisao restauradora. O emprestimo de (r-b) e detectado pelo
-    # bit de sinal (deslocamento aritmetico de Python), evitando o operador '<'.
-    r  = (r << 1) | bit
-    bf = ((r - b) >> 40) & 1        # 1 => houve emprestimo (r < b)
-    r  = r if bf else r - b        # so subtrai quando NAO houve emprestimo
-    q  = (q << 1) | (1 - bf)       # bit do quociente = NAO emprestimo
-    return q, r
-
-
-def _divmod32(a, b):
-    # Divisor combinacional: 32 estagios desenrolados. Retorna (quociente, resto).
-    a &= 0xFFFFFFFF
-    b &= 0xFFFFFFFF
-    if b == 0:
-        return 0, 0                 # guarda divisao por zero
-    q = 0
-    r = 0
-    q, r = _divstep(q, r, (a >> 31) & 1, b)
-    q, r = _divstep(q, r, (a >> 30) & 1, b)
-    q, r = _divstep(q, r, (a >> 29) & 1, b)
-    q, r = _divstep(q, r, (a >> 28) & 1, b)
-    q, r = _divstep(q, r, (a >> 27) & 1, b)
-    q, r = _divstep(q, r, (a >> 26) & 1, b)
-    q, r = _divstep(q, r, (a >> 25) & 1, b)
-    q, r = _divstep(q, r, (a >> 24) & 1, b)
-    q, r = _divstep(q, r, (a >> 23) & 1, b)
-    q, r = _divstep(q, r, (a >> 22) & 1, b)
-    q, r = _divstep(q, r, (a >> 21) & 1, b)
-    q, r = _divstep(q, r, (a >> 20) & 1, b)
-    q, r = _divstep(q, r, (a >> 19) & 1, b)
-    q, r = _divstep(q, r, (a >> 18) & 1, b)
-    q, r = _divstep(q, r, (a >> 17) & 1, b)
-    q, r = _divstep(q, r, (a >> 16) & 1, b)
-    q, r = _divstep(q, r, (a >> 15) & 1, b)
-    q, r = _divstep(q, r, (a >> 14) & 1, b)
-    q, r = _divstep(q, r, (a >> 13) & 1, b)
-    q, r = _divstep(q, r, (a >> 12) & 1, b)
-    q, r = _divstep(q, r, (a >> 11) & 1, b)
-    q, r = _divstep(q, r, (a >> 10) & 1, b)
-    q, r = _divstep(q, r, (a >>  9) & 1, b)
-    q, r = _divstep(q, r, (a >>  8) & 1, b)
-    q, r = _divstep(q, r, (a >>  7) & 1, b)
-    q, r = _divstep(q, r, (a >>  6) & 1, b)
-    q, r = _divstep(q, r, (a >>  5) & 1, b)
-    q, r = _divstep(q, r, (a >>  4) & 1, b)
-    q, r = _divstep(q, r, (a >>  3) & 1, b)
-    q, r = _divstep(q, r, (a >>  2) & 1, b)
-    q, r = _divstep(q, r, (a >>  1) & 1, b)
-    q, r = _divstep(q, r, (a      ) & 1, b)
-    return q & 0xFFFFFFFF, r & 0xFFFFFFFF
-
-
 def alu(control_bits, save_flags):
     global N, Z, BUS_C
     a, b = BUS_A, BUS_B
@@ -709,11 +558,6 @@ def alu(control_bits, save_flags):
     elif control_bits == 0b000001: o = a & 1
     elif control_bits == 0b000010: o = a ^ b
     elif control_bits == 0b000100: o = (b & 0xFFFFFFFF) >> 8   # B >> 8 (extracao de byte)
-    elif control_bits == 0b000101: o = _mul32(a, b)            # MUL  (combinacional)
-    elif control_bits == 0b000110: o = _divmod32(a, b)[0]      # DIV  (combinacional, unsigned)
-    elif control_bits == 0b000111: o = _divmod32(a, b)[1]      # MOD  (combinacional, unsigned)
-    elif control_bits == 0b001000: o = (a >> ((b & 3) << 3)) & 0xFF  # BEXT (byte de indice b)
-    elif control_bits == 0b001001: o = (a << 8) | (b & 0xFF)        # BINS (anexa byte baixo de b)
     elif control_bits == 0b111010: o = a - 1
     elif control_bits == 0b000011:
         o = a if not (a & 0x80000000) else (~a + 1) & 0xFFFFFFFF
@@ -780,7 +624,7 @@ def step():
         MBR = memory.read_byte(PC)
 
     # === ALU2 (snapshot dos regs + MBR pós-FETCH) ===
-    if not (w2 == W2_NONE and alu2_ctrl == 0):
+    if w2 != W2_NONE or alu2_ctrl != 0:
         cur_X, cur_Y, cur_H = X, Y, H
         cur_Z1, cur_Z2, cur_PC = Z1, Z2, PC
         cur_MDR = MDR
