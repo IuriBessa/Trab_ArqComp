@@ -551,6 +551,44 @@ firmware[172] = (
 firmware[173] = 0b1_000000000_000_00001001_00010000_000_100_100
 
 # ============================================================================
+# OPCODES DE OTIMIZACAO (acumulo e compare-and-swap em registradores)
+# ============================================================================
+# ---- opcode 174: Z1 = Z1 + X  (acumula em 1 microciclo; X preservado) ----
+# Substitui o par addxz1 + xtoz1 (2 µc) por 1 µc, sem destruir X.
+firmware[174] = 0b1_000000000_000_00111100_00000010_000_110_011
+
+# ---- opcode 175: IF X <= Y GOTO addr  (compara DOIS registradores) ---- 2 µc
+# A ALU2 calcula X - Y e o JAM usa (N|Z): salto tomado se X <= Y. Permite
+# compare-and-swap em registradores (jlexy + swap) sem passar pela memoria.
+firmware[175] = _branch(0b011, ALU2_BmA, a2=A2_Y, b2=B2_X)
+
+# ---- opcode 176: IF X < Y GOTO addr  (estrito) ---- 2 µc
+# Limite de laco em 1 instrucao (ex.: quot < d) sem destruir X; substitui o
+# par subxy + jn (5 µc -> 3 µc) e preserva o quociente.
+firmware[176] = _branch(0b010, ALU2_BmA, a2=A2_Y, b2=B2_X)
+
+# ---- opcode 177: X = ordena os 4 bytes de X (rede combinacional) ---- 1 µc
+# Sorting network de 4 elementos em hardware (min/max branchless). Menor no MSB.
+firmware[177] = 0b1_000000000_000_00001010_00010000_000_100_000
+
+# ---- opcode 178: X = produto escalar bytewise de X e Y ---- 1 µc
+# 4 multiplicadores de 8 bits + somador (MAC) em hardware combinacional.
+firmware[178] = 0b1_000000000_000_00001011_00010000_000_100_100
+
+# ---- opcode 179: X = Z1 // Y , H = Z1 % Y  (divmod com dividendo em Z1) ---- 1 µc
+# Evita o 'z1tox' antes do divmod no laco (economia 1 instrucao/iter).
+firmware[179] = (
+    0b1_000000000_000_00000110_00010000_000_110_100
+    | _dual(ALU2_MOD, A2_Z1, B2_Y, W2_H)
+)
+# ---- opcode 181: X = Z2 // Y , H = Z2 % Y  (divmod com dividendo em Z2) ---- 1 µc
+# (180 = NT_SLOT, reservado.)
+firmware[181] = (
+    0b1_000000000_000_00000110_00010000_000_111_100
+    | _dual(ALU2_MOD, A2_Z2, B2_Y, W2_H)
+)
+
+# ============================================================================
 # FUNÇÕES
 # ============================================================================
 
@@ -684,6 +722,42 @@ def _divmod32(a, b):
     return q & 0xFFFFFFFF, r & 0xFFFFFFFF
 
 
+# ----------------------------------------------------------------------------
+# MIN/MAX branchless e combinadores de byte (ordenacao e produto escalar).
+# Sem laco, sem '*'/'/'/'%', sem relacionais: o sinal de (a-b) escolhe o menor.
+# ----------------------------------------------------------------------------
+def _mn(a, b):
+    d = a - b
+    m = d >> 40                 # 0 se a>=b ; -1 (todos-1) se a<b
+    return (b + (d & m)) & 0xFF
+def _mx(a, b):
+    d = a - b
+    m = d >> 40
+    return (a - (d & m)) & 0xFF
+
+def _bsort4(w):
+    # Rede de ordenacao combinacional de 4 bytes (5 comparadores), crescente,
+    # com o MENOR no byte mais significativo.
+    b0 =  w        & 0xFF
+    b1 = (w >> 8)  & 0xFF
+    b2 = (w >> 16) & 0xFF
+    b3 = (w >> 24) & 0xFF
+    t = _mn(b0, b1); b1 = _mx(b0, b1); b0 = t
+    t = _mn(b2, b3); b3 = _mx(b2, b3); b2 = t
+    t = _mn(b0, b2); b2 = _mx(b0, b2); b0 = t
+    t = _mn(b1, b3); b3 = _mx(b1, b3); b1 = t
+    t = _mn(b1, b2); b2 = _mx(b1, b2); b1 = t
+    return ((b0 << 24) | (b1 << 16) | (b2 << 8) | b3) & 0xFFFFFFFF
+
+def _dot4(a, b):
+    # Produto escalar bytewise (4 multiplicadores + somador): usa _mul32.
+    s  = _mul32( a        & 0xFF,  b        & 0xFF)
+    s += _mul32((a >>  8) & 0xFF, (b >>  8) & 0xFF)
+    s += _mul32((a >> 16) & 0xFF, (b >> 16) & 0xFF)
+    s += _mul32((a >> 24) & 0xFF, (b >> 24) & 0xFF)
+    return s & 0xFFFFFFFF
+
+
 def alu(control_bits, save_flags):
     global N, Z, BUS_C
     a, b = BUS_A, BUS_B
@@ -714,6 +788,8 @@ def alu(control_bits, save_flags):
     elif control_bits == 0b000111: o = _divmod32(a, b)[1]      # MOD  (combinacional, unsigned)
     elif control_bits == 0b001000: o = (a >> ((b & 3) << 3)) & 0xFF  # BEXT (byte de indice b)
     elif control_bits == 0b001001: o = (a << 8) | (b & 0xFF)        # BINS (anexa byte baixo de b)
+    elif control_bits == 0b001010: o = _bsort4(a)             # BSORT (ordena 4 bytes de a)
+    elif control_bits == 0b001011: o = _dot4(a, b)           # DOT (produto escalar bytewise)
     elif control_bits == 0b111010: o = a - 1
     elif control_bits == 0b000011:
         o = a if not (a & 0x80000000) else (~a + 1) & 0xFFFFFFFF

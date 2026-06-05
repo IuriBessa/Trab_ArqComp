@@ -22,6 +22,11 @@ no_op_instructions = {
     'addxz1'  : 125, 'subxz1'  : 126,
     'addyz1'  : 127, 'subyz1'  : 137,
     'addz1xy' : 158, 'subz1xy' : 159,
+    'addz1x'  : 174,                  # Z1 = Z1 + X  (acumula em 1 ciclo; X preservado)
+    'bsortx'  : 177,                  # X = 4 bytes de X ordenados (menor no MSB) — 1 ciclo
+    'dotxy'   : 178,                  # X = produto escalar bytewise de X e Y — 1 ciclo
+    'divmodz1': 179,                  # X = Z1//Y , H = Z1%Y  (dividendo em Z1)
+    'divmodz2': 181,                  # X = Z2//Y , H = Z2%Y  (dividendo em Z2)
     'incz1'   : 84,  'decz1'   : 83,
     'incz2'   : 91,  'decz2'   : 90,
     'inch'    : 88,  'dech'    : 89,
@@ -78,6 +83,8 @@ jmp_instructions = {
     'jodd'  : 76,   'jzy'   : 35,   'jny'   : 59,   'jley'  : 57,
     'jnz1'  : 106,  'jlez1' : 108,  'jzz1'  : 85,   'jzz2'  : 92,
     'jzh'   : 110,  'jnh'   : 112,  'jleh'  : 114,
+    'jlexy' : 175,                  # IF X <= Y GOTO addr  (compara X e Y)
+    'jltxy' : 176,                  # IF X <  Y GOTO addr  (estrito)
     'call'  : 102,
 }
 
