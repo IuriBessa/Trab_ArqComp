@@ -1,192 +1,24 @@
-Questionamentos principais:
-1 — Busca de operandos sem paralelismo
-Sequências como X = mem[addr] precisam de 2 microciclos: um para MAR←MBR e outro para X←MDR. A ALU2 poderia calcular MAR enquanto a ALU1 incrementa PC, mas os opcodes atuais (ex: fw[40], fw[2]) já fazem isso — porém a escrita do resultado final em X/Y sempre fica para um microciclo separado porque READ só ocorre após ALU2.
+Questionamentos principais: 
 
-Oportunidade: encadear a leitura diretamente no passo de incremento do PC para que READ já produza MDR no mesmo ciclo em que MAR foi setado.
+Problema 1 — Fatoração / divisores
+O gargalo dominante é o loop de divisão tentativa até √N. Cada iteração precisa de um teste de divisibilidade (X % D) e a diferença crítica é:
+Usando opcodes 163/164 (div/mod software): cada divisão custa O(log N) microciclos internamente — são dezenas de µc por passo do loop.
+Usando opcodes 168/169 (div/mod combinacional em 1 µc cada): o custo por iteração cai para mod (1) + branch (2) + div (1) = 4 µc. Ganho de 5–10×.
 
-2 — Branches condicionais gastam 2+ ciclos extras
-Todo branch (opcodes 11, 18, 43, 57, 59…) segue o padrão: ciclo de eval flags → ciclo de fetch addr → ciclo de goto. O firmware[11] salva flags, depois fw[12] busca o operando MBR=addr, e fw[268] faz o salto real. São 3 microciclos por branch.
+Problema 2- Não há uma função IsPrimo nativo trabalhando apenas com portas lógicas ou bit masks. Esse é um problema que faz que o processador temha que se dividir entre dois problemas achar o proximo primo e depoois dividir, achar o proximo primo deveria ser mais facil.
 
-Oportunidade: usar ALU2 para calcular o alvo do salto (PC←MBR) enquanto ALU1 ainda avalia a condição — colapsando para 2 microciclos.
+Problemas 3 e 4:
+Soma de divisores: loop O(N) em vez de O(√N)
+Loop d de 1 até N+1 é desnecessário. Iterando até √(N+1) e somando d + (N+1)/d quando d | (N+1), reduz de O(N) para O(√N) iterações. Requer opcode 169 (mod hw) + 168 (div hw).
+CRÍTICO
+Teste de primalidade sem otimização de salto 2/3
+Testar apenas d=2 e depois d=6k±1 (k=1,2,…) reduz iterações em ~3×. No firmware: pré-teste d=2 com opcode 76 (1 bit, 2 µc), depois incremento +6 no divisor (opcode 88/89)
 
-3 — Loop de divisão/módulo implementado em software
-Divisão e módulo (necessários para fatoração prima e soma de divisores) não existem no ISA. São emulados por subtração repetida, gastando O(N) ciclos por operação. Para um valor de entrada como 42, o cálculo de 42 mod 7 subtrai 7 seis vezes.
+Sugestão: Usar CALL/RET (102/105) para a subrotina de primalidade evita duplicar microcódigo nos dois contextos.
 
-Oportunidade: adicionar opcode de divisão por shifts + subtração condicional usando ALU2 para shifts e ALU1 para a subtração em paralelo — reduz para O(log N) ciclos.
+Problema 4 — Sort de 4 bytes dentro de um word
+O gargalo mais estrutural. Dois problemas sobrepostos:
 
-4 — ALU2 subutilizada nos loops de teste
-Nos loops que testam divisibilidade (X mod D == 0), a ALU2 fica ociosa enquanto ALU1 faz a subtração. Ela poderia estar calculando D+1 (próximo divisor a testar) em paralelo, eliminando um microciclo de incremento por iteração.
-
-opcode 17 (X−1) desnecessário se ALU2 fizer D+1
-economia: ~1 ciclo por iteração de loop
-
-5 — Acumulação de soma exige leitura+escrita separadas
-X = X + mem[addr] (opcode 2) usa 2 microciclos. Para o algoritmo de soma de fatores, isso é executado toda vez que um fator primo é encontrado. Com ALU2 calculando a leitura do próximo fator em paralelo à escrita do acumulador, o par de microciclos poderia ser reduzido para 1 em casos encadeados.
-
-6 — Falta opcode de teste de paridade sem custo extra
-O opcode 76 (IF X odd GOTO) existe, mas verifica paridade em 3 microciclos (AND 1 → flags → branch). A estrutura do problema exige um teste de paridade logo no início. ALU2 poderia fazer X & 1 enquanto ALU1 faz o fetch, e o JAM poderia usar o resultado diretamente.
-
-
-7- Ramo não-primo: busca linear do próximo primo
-Avançar de N até o próximo primo é O(gap × √primo). O gap médio entre primos cresce com log(N). Para N=100, o próximo primo é 101 — 1 teste. Mas N=114 → próximo é 127, testando 115…127 = 12 candidatos, cada um com √127 ≈ 11 divisores. São ~130 testes de divisibilidade, cada um com subtração repetida.
-Único neste problema: o loop externo (busca do próximo primo) e o loop interno (teste de divisibilidade) são ambos ilimitados e interagem.
-
-8- Duplo loop de divisão por subtração — O(N²) no pior caso
-Teste de primalidade de N requer verificar todos os divisores de 2 até √N. Sem opcode de divisão/módulo, cada teste N mod D == 0 custa N/D subtrações. Para N=97 testando D=7: 13 subtrações, cada uma ~5 ciclos → 65 ciclos só pra esse divisor. Multiplicado por √97 ≈ 9 candidatos = centenas de ciclos para um único teste de primalidade.
-No ramo não-primo, esse custo se repete para cada candidato a primo testado. N=14 testa 15 (não-primo), 16 (não-primo), 17 (primo) — três testes de primalidade completos.
-
-9- ALU2 ociosa no teste de divisibilidade
-No loop interno while R >= D: R -= D, a ALU1 faz a subtração e a ALU2 fica vazia. Ela poderia comparar R < D em paralelo (calculando R - D com sf2=1) para que o branch seguinte use flags já prontas, eliminando o ciclo de avaliação de condição separado.
-
-Além disso, ALU2 poderia incrementar D para o próximo candidato enquanto ALU1 ainda está no ciclo corrente.
-
-
-10- N+1 e √(N+1) calculados com custo extra
-O ramo primo precisa de N+1 (opcode 17 ou 33 existem, 1 ciclo — ok) e depois calcular √(N+1) para limitar o loop de divisores. Sem opcode de raiz quadrada, o limite usa D*D ≤ N+1 por multiplicação iterativa ou teste de quadrado — cada verificação são múltiplos ciclos.
-Oportunidade: usar ALU2 para calcular D² como D+D acumulado enquanto ALU1 faz a subtração do loop de módulo — evita uma multiplicação separada por iteração.
-
-11- Branches de 3 ciclos em todos os loops
-Igual ao problema anterior: todo IF X == 0, IF X < 0, GOTO consome 3 microciclos (eval → fetch addr → jump). Com dois loops aninhados, cada iteração dispara 2–3 branches. Para N=97 no ramo primo, o loop de divisores executa ≈20 iterações × 3 branches/iter = 60 ciclos só em overhead de controle de fluxo.
-
-
-12- Multiplicação 8×8 sem opcode MUL — shift-and-add manual
-O ISA não tem multiplicação. Cada produto A[i] × B[i] (dois valores de 8 bits, resultado até 16 bits) precisa ser implementado como shift-and-add em software: 8 iterações, cada uma testando o bit menos significativo, somando condicionalmente e shiftando.
-Por iteração de bit: IF LSB(b) → acc += a + a <<= 1 + b >>= 1 + teste de parada
-Cada iteração custa ~6–8 ciclos (branch condicional 3 ciclos + shift 1 + soma 1 + decremento contador 1). Com 8 bits e 4 produtos: 4 × 8 × ~7 = ~224 ciclos só para as multiplicações.
-Oportunidade ALU dupla: dentro do loop de shift-and-add, ALU1 faz acc += a enquanto ALU2 faz b >>= 1 (shift de B) simultaneamente. O shift e a soma condicional colapsam para 1 ciclo em vez de 2, cortando o custo de multiplicação quase pela metade → ~128 ciclos.
-
-13- Extração de 8 bytes: 4 shifts + 4 AND por palavra
-Para extrair A[0..3] de um valor de 32 bits, cada byte precisa de:
-• shift direito de 0, 8, 16, 24 posições para alinhar o byte ao LSB
-• AND com 0xFF para mascarar os bits superiores
-O ISA tem shift de 1 bit (opcode 32, 50) e shift de 8 bits (via <<8 na ALU). Extrair o byte mais significativo (A[0] = bits 31..24) exige 3 shifts de 8 posições encadeados — 3 ciclos de shift + 1 de AND = 4 ciclos. Para 8 bytes (4 de A, 4 de B) com custo médio de 3 ciclos cada: ~24 ciclos só de extração.
-Oportunidade ALU dupla: enquanto ALU1 extrai A[i] com AND+shift, ALU2 pode simultaneamente extrair B[i] — reduzindo de 8 operações seriais para 4 paralelas.
-
-14- Branch condicional no inner loop da multiplicação
-O loop de shift-and-add testa o LSB de B a cada iteração com AND & 1 (opcode 80 existe: o = a & 1) seguido de um branch condicional. Com branches custando 3 microciclos cada e 8 iterações por multiplicação × 4 multiplicações = 96 ciclos só de overhead de branch no loop MUL.
-Oportunidade ALU dupla: opcode 76 (IF X odd GOTO) já faz AND & 1 + branch em 1 instrução — explorar isso. Além disso, ALU2 pode manter o shift de A enquanto ALU1 testa o LSB de B.
-
-15- Falta de AND imediato com 0xFF para mascarar bytes
-Para isolar cada byte após o shift, é preciso fazer X = X AND 0xFF. O valor 0xFF precisa ser carregado em um registrador auxiliar primeiro (opcode 66: X = imm, 1 ciclo) antes do AND. Fazendo isso 8 vezes = 8 ciclos extras de setup de máscara que poderiam ser zerados com um opcode AND imm.
-Oportunidade: manter 0xFF em H ou Z1 durante toda a extração, reutilizando-o como operando fixo de ALU1/ALU2 sem recarregar.
-
-16- Registradores insuficientes para manter todos os bytes simultâneos
-O ISA tem X, Y, Z1, Z2, H — 5 registradores gerais. Para o produto escalar seria ideal manter A[i] e B[i] em registradores enquanto executa a multiplicação, mas com apenas 5 slots e o acumulador da soma precisando de 1, sobram 4 — exatamente o suficiente para 1 par (A[i], B[i]) + acumulador + contador do loop MUL. Isso força extrair, multiplicar, acumular e só então carregar o próximo par, sem possibilidade de prefetch.
-
-17- ALU dupla permite extração pareada A[i] e B[i] simultânea
-Como A e B são lidos da memória para registradores distintos (X ← A, Y ← B pelos opcodes de load existentes), a extração de A[i] e B[i] pode ser feita em paralelo: ALU1 opera sobre X (shift + AND) enquanto ALU2 opera sobre Y (shift + AND com os mesmos parâmetros). Isso não requer nenhum novo opcode — só uma microinstrução que drive ambas as ALUs com os mesmos operandos de controle mas fontes diferentes (A1=X vs A2=Y).
-Resultado: as 8 extrações seriais colapsam para 4 paralelas, e dentro da multiplicação o shift de A e o shift de B podem acontecer simultaneamente a cada iteração do loop shift-and-add — o maior ganho percentual deste problema com a arquitetura atual.
-
-18- 
-
-
-O gargalo estrutural novo: loop de loops no ramo não-primo
-No problema anterior os dois ramos eram simétricos e independentes. Aqui, o ramo não-primo tem complexidade composta: para cada candidato C = N+1, N+2, ..., executa um teste de primalidade completo O(√C). No pior caso (N justo antes de um primo distante), isso multiplica o custo do teste de primalidade pelo gap entre primos. Para N=113, o próximo primo é 127 — são 13 candidatos, cada um com √127 ≈ 11 divisores a testar. Sem divisão nativa, são ~13 × 11 × (custo de subtração) ciclos só para achar o próximo primo.
-O que a ALU dupla pode fazer de único aqui
-O teste de primalidade de N e os testes de cada candidato no ramo não-primo são idênticos em estrutura. Se implementado como subrotina via CALL/RET (opcodes 102 e 105 já existem no firmware, usando Z2 como link register), a ALU2 pode salvar o endereço de retorno enquanto ALU1 já carrega o primeiro argumento — eliminando o overhead fixo de setup de cada chamada repetida. Para 13 candidatos isso economiza ~13 × 3 ciclos de overhead.
-A comparação D² ≤ N como limite do loop
-Este é o gargalo que o problema anterior não tinha de forma tão aguda. O loop de divisores de N+1 precisa parar em √(N+1), e sem MUL nativo calcular D² exatamente custa caro. A alternativa eficiente com a ALU dupla: manter em Z1 o valor corrente de D e em Z2 o valor de D² atualizado incrementalmente — a cada iteração ALU2 faz Z2 = Z2 + 2*D + 1 (identidade (D+1)² = D² + 2D + 1) enquanto ALU1 executa o teste de divisibilidade. Isso mantém D² atualizado em O(1) por iteração sem nenhuma multiplicação.
-
-O gargalo de extração de bytes
-O shift de 8 posições existe via ALU_ctrl = 0b11_xxxxxx (shift_bits = 0b11 faz << 8), mas não existe shift direito de 8 — só shift direito de 1 bit (shift_bits = 0b10). Extrair o byte mais significativo exige 3× aplicar >> 1 oito vezes cada = 24 ciclos de shift só pra um byte. Uma alternativa é armazenar A e B já decompostos na memória como 4 bytes separados — mas isso empurra o custo para antes do programa, não resolve o gargalo.
-O loop de multiplicação como alvo principal da ALU dupla
-O loop shift-and-add canônico em pseudocódigo é:
-acc = 0
-for bit in 0..7:
-    if B & 1: acc += A
-    A <<= 1
-    B >>= 1
-A dependência crítica aqui é B >>= 1 → teste do próximo LSB. Mas A <<= 1 é independente do resultado do teste — ALU2 pode fazer o shift de A enquanto ALU1 faz a soma condicional acc += A (usando o snapshot de A pré-shift). E depois, ALU2 pode fazer B >>= 1 enquanto ALU1 atualiza o acumulador. Isso colapsa 3 operações por iteração para 1 ciclo efetivo usando o paralelismo snapshot da arquitetura.
-O opcode 76 como atalho crítico
-IF X odd GOTO addr (fw[76]) já faz X & 1 + test + branch em uma instrução com JAM=101. Se B for mantido em X durante o loop de multiplicação, cada iteração usa apenas esse opcode para testar o LSB — sem precisar de um AND separado, sem ciclo extra de avaliação de flags.
-
-
-
-
-
-
-
-
-
-
-
-Sem instrução de divisão nativa — usa opcode 163 (shift-and-subtract O(log N)) para cada candidato a fator
-crítico
-→ fatoração de N exige O(√N) tentativas × O(log N) ciclos cada = O(√N · log N) microciclos totais
-Sem instrução de módulo (resto) inline — opcode 164 é separado e igualmente custoso
-crítico
-→ cada teste "N % p == 0" custa 1 chamada ao opcode 164 + branch condicional
-Apenas 2 registradores de uso geral (X, Y) + auxiliares (H, Z1, Z2) — loop de fatoração precisa manter N, p, soma simultaneamente
-médio
-→ necessário usar Z1/Z2 como "variáveis extras"; salvar/restaurar via mem[addr] se precisar de mais
-
-
-
-Teste de primalidade exige O(√N) divisões por tentativa, cada uma custando O(log N) ciclos via opcode 164
-crítico
-→ encontrar o "próximo primo" acima de N pode exigir múltiplas rodadas de teste
-Dupla iteração: primeiro acha o próximo primo (loop externo), depois soma divisores (loop interno) — dois O(√N · log N) encadeados
-crítico
-Pressão sobre registradores aumenta: precisa guardar N original, candidato a primo, e acumulador de soma ao mesmo tempo
-
-Extração de cada byte de 8 bits exige opcode 165/166 (X>>8) + AND com 0xFF — 2–3 microciclos por byte
-médio
-→ 4 bytes por palavra × 2 palavras = 8 extrações no total
-Multiplicação de dois bytes usa opcode 162 (shift-and-add, O(log N) iterações na microarquitetura)
-crítico
-→ 4 multiplicações de 8 bits cada; worst case ~8 iterações × ~4 microciclos = ~32 ciclos por multiplicação
-Sem instrução de multiplicação de 8 bits dedicada — opcode 162 é de 32 bits completos
-médio
-→ funciona, mas desperdiça ciclos em bits de sinal desnecessários para operandos de 8 bits
-
-Extrair e reempacotar 4 bytes em registradores de 32 bits exige sequências de SHL/SHR/AND — sem instrução de "pack/unpack" nativa
-crítico
-→ cada reposicionamento de byte custa 2–4 microciclos (extrai, desloca para posição correta, OR com os demais)
-Comparação entre bytes requer extração prévia (shift+AND) antes de um branch condicional — não há "compare bytes in-word"
-médio
-SWAP X,Y (opcode 48) em snapshot semântico ajuda a trocar dois registradores sem variável temporária — 1 microciclo
-ok
-Apenas 2 registradores principais (X, Y): manter 4 valores simultaneamente força uso de mem[] como "pilha" de bytes temporários
-crítico
-→ acessos à memória adicionam latência (READ = 1 ciclo extra por acesso)
-Bubble sort de 4 elementos = 6 comparações máximo — o custo de extract+compare domina sobre o número de comparações
-
-
-
-Problema: div/mod em software — O(log N) ciclos por operação
-Os opcodes 163 e 164 implementam divisão via shift-and-subtract em microprograma. Para N=10⁶, fatoração exige ~1000 chamadas × ~20 ciclos = 20.000 microciclos só para divisão.
-Solução 1 — instrução DIV/MOD com restoring division na ALU1
-Novo opcode: DIV_HW (X, Y → quociente em X, resto em H)
-Adicionar um combinador de divisão de 1 microciclo na ALU1. Para inteiros de 32 bits com divisor fixo, a ALU1 pode executar restoring division em hardware em vez de loop de microprograma.
-ALU1_DIV = 0b11000000 # novo encoding
-fw[163_new] = ALU1 DIV # X = X // Y, H = X % Y
-fw[164_new] = fw[163_new] + write H→X # X = resto
-Requer adicionar um divisor combinacional ao datapath da ALU1. Latência de hardware: ~1 microciclo (vs. 15–25 atuais).
-
-ALU1 calcula quociente, ALU2 calcula resto no mesmo microciclo
-Sem modificar o datapath, usar a ALU dupla para que um único microciclo produza ambos os resultados. Hoje eles custam 2 chamadas separadas ao microprograma.
-_dual(ALU2_DIV_MOD, a2=A2_X, b2=B2_Y, w2=W2_H)
-# ALU1: X = X // Y
-# ALU2: H = X % Y (mesmo ciclo)
-Exige que a ALU2 suporte o encoding de divisão. Ganho: elimina a segunda chamada de microprograma para módulo.
-
-Um único slot de firmware retorna X=quociente, H=resto
-Sem nenhuma mudança de hardware, reorganizar o microprograma do opcode 163 para já escrever o resto em H ao final do loop. Economiza a segunda chamada completa ao opcode 164 nos casos que precisam de ambos.
-
-DIV/MOD em hardware (ALU1)
-Divisor combinacional no datapath	hardware	20× (20→1 ciclo)	1, 2, 3, 4
-MUL 16×16 bits em hardware
-Multiplicador combinacional ALU1	hardware	128× (128→1 ciclo)	3 (produto escalar)
-BEXT / BINS (byte lanes)
-Novos encodings na ALU1	hardware	2–3× por extração	3, 4
-Banco de registradores R0–R3
-Expandir BUS_A/B para 4 bits	hardware	Elimina acesso a mem[]; depende do algoritmo	1, 2, 4
-DIVMOD combinado (um opcode)
-Só firmware — sem hardware novo	firmware	~1.5× quando ambos são necessários	1, 2
-MAC via ALU dupla (mul+acum)
-Estender ALU2 com encoding MUL	firmware	2× no produto escalar	3
-PUSH/POP sobre Z1/Z2
-Novos opcodes de firmware, sem hw	firmware	Elimina 1–2 acessos mem[] por iteração	1, 2
-Estratégia mem[] como array de bytes
-Algoritmo — sem mudança de hw/fw	algoritmo	Simplifica controle; não reduz ciclos brutos
+Pressão de registradores: 4 bytes extraídos + acumulador de resultado requerem os 5 registradores (X, Y, H, Z1, Z2) quase todos ocupados. Qualquer spill para memória custa 2+ µc extras.
+Branches de comparação dominam: insertion sort com loop tem até 6 comparações, cada uma custando 1 (cmp) + 2 (branch) + 1 (swap) = 4 µc. Usar um sorting network fixo de 4 elementos (5 comparadores "compare-and-swap" em posições fixas, sem branches de controle de loop) elimina o overhead de branch de iteração e dá custo determinístico. O opcode 48 (SWAP X↔Y em 1 µc via ALU dupla) é central aqui — sem ele, um swap custaria 3 µc
 
