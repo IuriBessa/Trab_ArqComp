@@ -1,11 +1,5 @@
 ; ==============================================================================
 ; fatores_ou_divisores.asm  (= fatores_ou_divisores.asm + divmodz2 nos lacos)
-;
-;   Igual a versao com roda 6k+/-1, mas usa 'divmodz2' (divmod com dividendo em
-;   Z2) eliminando o 'z2tox' antes de cada divmod -> 1 instrucao a menos por
-;   iteracao. Backup: fatores_ou_divisores.asm continua intacto.
-;
-;   word 1 = SAIDA | word 2 = ENTRADA N
 ; ============================================================================
 
         goto main

@@ -1,17 +1,10 @@
-#!/usr/bin/env python3
 # ==============================================================================
-# assembler_ufc2x_dual.py  -  Assembler para o processador ufc2x_dual.py
-#
-# USO:
-#   python assembler_ufc2x_dual.py programa.asm saida.bin
-#
-# FORMATO .asm:
-#   [label:] instrução [operando]   ; comentário opcional
+# assembler_ufc2x_dual.py  
 # ==============================================================================
 
 import sys
 
-# -- SEM OPERANDO (1 byte) ----------------------------------------------------
+# -- SEM OPERANDO 
 no_op_instructions = {
     'halt'    : 0xFF,
     'ret'     : 105,
@@ -60,7 +53,7 @@ no_op_instructions = {
     'clrh'    : 94,  'clrz1'   : 95,  'clrz2' : 96,
 }
 
-# -- COM ENDEREÇO DE MEMÓRIA (2 bytes: opcode + word_addr) --------------------
+# -- COM ENDEREÇO DE MEMÓRIA 
 mem_instructions = {
     'mov'   : 6,     # mem[addr] = X
     'movy'  : 22,    # mem[addr] = Y
@@ -76,7 +69,7 @@ mem_instructions = {
     'ldz2'  : 151,   # Z2 = mem[addr]
 }
 
-# -- SALTOS (2 bytes: opcode + byte_addr) -------------------------------------
+# -- SALTOS 
 jmp_instructions = {
     'goto'  : 9,
     'jz'    : 11,   'jn'    : 18,   'jle'   : 43,   'jnn'   : 100,
@@ -88,7 +81,7 @@ jmp_instructions = {
     'call'  : 102,
 }
 
-# -- IMEDIATOS (2 bytes: opcode + imm) ----------------------------------------
+# -- IMEDIATOS 
 imm_instructions = {
     'ldxi'  : 66,   'ldyi'  : 67,
     'ldz1i' : 87,   'ldz2i' : 154,  'ldhi' : 156,
