@@ -11,18 +11,20 @@ MBR = 0
 X   = 0
 Y   = 0
 H   = 0
-Z1  = 0
+Z1  = 0       #Registradores auxiliares criados para ajudar a não precisar acessar direto a memória
 Z2  = 0
 
-N = 0
-Z = 1
+N = 0         #Verifica se o numero é negativo
+Z = 1         #Verifica se não é 0
 
 BUS_A  = 0
 BUS_B  = 0
 BUS_C  = 0
-BUS_A2 = 0
+BUS_A2 = 0    #Barramentos criados para a ALU dupla
 BUS_B2 = 0
 BUS_C2 = 0
+
+#Criação do array dos firmwares. Usa-se o Q para aguentar numeros maiores
 
 firmware = array('Q', [0]) * 512
 
@@ -51,37 +53,32 @@ ALU2_BmA  = 0b00111111
 ALU2_Bp1  = 0b00110101
 ALU2_Bm1  = 0b00110110
 ALU2_Ap1  = 0b00111001
-ALU2_AND1 = 0b00000001   # A & 1   (teste de paridade na ALU2)
-ALU2_AaB  = 0b00001100   # A & B   (AND imediato: X & MBR)
-ALU2_Bshl = 0b01010100   # B << 1  (shift left na ALU2)
-ALU2_Ashl = 0b01011000   # A << 1  (shift left de H na ALU2)
-ALU2_Ashr = 0b10011000   # A >> 1  (shift right de H na ALU2)
-ALU2_MUL  = 0b00000101   # A * B                       (multiplicador 1 ciclo)
-ALU2_DIV  = 0b00000110   # A // B                      (divisor 1 ciclo)
-ALU2_MOD  = 0b00000111   # A % B                       (resto 1 ciclo)
+ALU2_AND1 = 0b00000001   # A & 1   (testa a paridade na ALU2)
+ALU2_AaB  = 0b00001100   # A & B   (Porta AND imediato do X e MBR)
+ALU2_Bshl = 0b01010100   # B << 1  (shift left na ALU2, faz divisão)
+ALU2_Ashl = 0b01011000   # A << 1  (shift left de H na ALU2, faz divisão)
+ALU2_Ashr = 0b10011000   # A >> 1  (shift right de H na ALU2, multiplica por 2)
+ALU2_MUL  = 0b00000101   # A * B                       (multiplica chamando a função)
+ALU2_DIV  = 0b00000110   # A // B                      (divide chamando a função criada)
+ALU2_MOD  = 0b00000111   # A % B                       (resto chamando a função criada)
 ALU2_BEXT = 0b00001000   # (A >> 8*(B&3)) & 0xFF       (byte extract)
 ALU2_BINS = 0b00001001   # (A << 8) | (B & 0xFF)       (byte pack/append)
 
+
+#código da ALU2 que extrai as instruções que ela deve trabalhar
 
 def _dual(alu2=ALU2_B, a2=A2_MBR, b2=B2_MBR, w2=W2_NONE, sf2=0):
     return ((sf2 << 63) | (alu2 << 55) | (a2 << 52) | (b2 << 49) | (w2 << 46))
 
 
-# ----------------------------------------------------------------------------
-# DESVIOS CONDICIONAIS EM 2 MICROCICLOS  (Questionamentos #2 e #11)
-# ----------------------------------------------------------------------------
-# No esquema antigo o ramo TOMADO gastava 4 microciclos:
-#   eval(flags) -> redireciona p/ 9 -> fw[9] (PC++,FETCH addr) -> fw[10] (PC=MBR)
-#
-# Com a ALU dupla o ciclo de avaliacao faz tudo de uma vez:
+# Com a ALU dupla o ciclo de avaliações faz tudo de uma vez:
 #   ALU1: PC++ e FETCH do byte de endereco (MBR = addr-alvo)
 #   ALU2: avalia o registrador testado com sf2=1 -> escreve flags N/Z
 #   JAM:  usa as flags da ALU2 para escolher o proximo microendereco
-#
-# Ambos os ramos passam a custar 2 microciclos. Os destinos sao 2 slots
-# compartilhados por todos os branches:
+
 #   NT_SLOT  (nao-tomado): PC++ (descarta o byte de endereco), FETCH, despacha
 #   TK_SLOT  (tomado)    : PC = MBR (alvo), FETCH, despacha
+
 NT_SLOT = 180
 TK_SLOT = NT_SLOT | 0x100   # 436
 
@@ -91,11 +88,9 @@ def _branch(jam, alu2, a2=0, b2=0):
             | (0b00100000 << 9) | (0b001 << 6) | (0b010 << 3) | 0b001)
     return base | _dual(alu2, a2, b2, W2_NONE, sf2=1)
 
-
-# ============================================================================
-# FIRMWARE
-# ----------------------------------------------------------------------------
-# Layout do MIR (64 bits):
+#==================================================
+# Layout do MIR com seus 64 bits.
+#==================================================
 # [63]    SAVE_FLAGS2
 # [62:55] ALU2
 # [54:52] BUS_A2
@@ -111,157 +106,134 @@ def _branch(jam, alu2, a2=0, b2=0):
 # [5:3]   BUS_A1
 # [2:0]   BUS_B1
 #
-# Ordem de execução em step():
+#======================================
+# Ordem de execucao:
+#======================================
 #   1) snapshot regs
-#   2) ALU1 avalia e escreve
-#   3) FETCH  (usa PC pós-ALU1)
+#   2) ALU1 
+#   3) FETCH  
 #   4) ALU2 avalia (snapshot de X/Y/H/Z1/Z2/PC/MDR + MBR pós-FETCH) e escreve
 #   5) READ   (usa MAR pós-ALU2)
 #   6) WRITE  (usa MAR e MDR pós-ALU2)
 #   7) next_instruction
-# ============================================================================
+
+
+
 
 # [0] init/fetch
 firmware[0] = 0b1_000000000_100_00110101_00100000_001_010_001
 
-# ---- opcode 2: X = X + mem[addr] ----
-firmware[2] = (
-    0b0_000000100_000_00110101_00100000_011_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [2] X = X + mem[addr] 
+firmware[2] = (0b0_000000100_000_00110101_00100000_011_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[4] = 0b1_000000000_000_00111100_00010000_000_001_011
 
-# ---- opcode 6: mem[addr] = X ----
-firmware[6] = (
-    0b0_000001000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [6] mem[addr] = X 
+firmware[6] = (0b0_000001000_000_00110101_00100000_001_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[8] = 0b0_000000000_000_00010100_01000000_100_000_011
 
-# ---- opcode 9: GOTO addr ----
+# [9] GOTO addr 
 firmware[9]  = 0b0_000001010_000_00110101_00100000_001_010_001
 firmware[10] = 0b0_000000000_100_00010100_00100000_001_000_010
 
-# ---- slots compartilhados pelos desvios condicionais de 2 microciclos ----
+# slots compartilhados pelos desvios condicionais de 2 microciclos 
 # NT_SLOT (180): ramo NAO-tomado -> PC++ (descarta byte de endereco), FETCH, despacha
 firmware[NT_SLOT] = 0b0_000000000_100_00110101_00100000_001_010_001
 # TK_SLOT (436): ramo TOMADO -> PC = MBR (endereco-alvo), FETCH, despacha
 firmware[TK_SLOT] = 0b0_000000000_100_00010100_00100000_001_000_010
 
-# ---- opcode 11: IF X == 0 GOTO addr ---- (2 microciclos)
+# [11]: IF X == 0 GOTO addr
 firmware[11] = _branch(0b001, ALU2_B, b2=B2_X)
 
-# ---- opcode 13: X = X - mem[addr] ----
-firmware[13] = (
-    0b0_000001111_000_00110101_00100000_011_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [13]: X = X - mem[addr] 
+firmware[13] = (0b0_000001111_000_00110101_00100000_011_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[15] = 0b1_000000000_000_00111111_00010000_000_001_011
 
-# ---- opcodes 16,17 ----
+# [16]: Incrementa X ou Decrementa X
 firmware[16] = 0b1_000000000_000_00110101_00010000_000_000_011
 firmware[17] = 0b1_000000000_000_00110110_00010000_000_000_011
 
-# ---- opcode 18: IF X < 0 GOTO addr ---- (2 microciclos)
+# [18] IF X < 0 GOTO addr 
 firmware[18] = _branch(0b010, ALU2_B, b2=B2_X)
 
-# ---- opcodes 20,21 ----
+# [20] Deixa X e Y com valor de X, SWAP que foi feito errado, mas os opcodes estão sequênciais, não quis apagar
 firmware[20] = 0b1_000000000_000_00010100_00001000_000_000_011
 firmware[21] = 0b1_000000000_000_00010100_00010000_000_000_100
 
-# ---- opcode 22: mem[addr] = Y ----
-firmware[22] = (
-    0b0_000011000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [22]: mem[addr] = Y 
+firmware[22] = (0b0_000011000_000_00110101_00100000_001_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[24] = 0b0_000000000_000_00010100_01000000_100_000_100
 
-# ---- opcode 25: Y = Y + mem[addr] ----
-firmware[25] = (
-    0b0_000011011_000_00110101_00100000_011_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [25]: Y = Y + mem[addr] 
+firmware[25] = (0b0_000011011_000_00110101_00100000_011_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[27] = 0b1_000000000_000_00111100_00001000_000_001_100
 
-# ---- opcode 28: Y = mem[addr] ----
-firmware[28] = (
-    0b0_000011110_000_00110101_00100000_011_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [28]: Y = mem[addr] 
+firmware[28] = (0b0_000011110_000_00110101_00100000_011_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[30] = 0b1_000000000_000_00010100_00001000_000_000_000
 
-# ---- opcodes 31..34 ----
+# [31]: Shifts no X
 firmware[31] = 0b1_000000000_000_01010100_00010000_000_000_011
 firmware[32] = 0b1_000000000_000_10010100_00010000_000_000_011
 firmware[33] = 0b1_000000000_000_00110101_00001000_000_000_100
 firmware[34] = 0b1_000000000_000_00110110_00001000_000_000_100
 
-# ---- opcode 35: IF Y == 0 GOTO addr ---- (2 microciclos)
+# [35]: IF Y == 0 GOTO addr 
 firmware[35] = _branch(0b001, ALU2_B, b2=B2_Y)
 
-# ---- opcode 40: X = mem[addr] ----
-firmware[40] = (
-    0b0_010000001_000_00110101_00100000_011_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [40]: X = mem[addr] 
+firmware[40] = (0b0_010000001_000_00110101_00100000_011_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[129] = 0b1_000000000_000_00010100_00010000_000_000_000
 
-# ---- opcodes 41,42 ----
+# [41]: Limpa X e Limpa Y
 firmware[41] = 0b1_000000000_000_00010000_00010000_000_000_000
 firmware[42] = 0b1_000000000_000_00010000_00001000_000_000_000
 
-# ---- opcode 43: IF X <= 0 GOTO addr ---- (2 microciclos)
+# [43]: IF X <= 0 GOTO addr 
 firmware[43] = _branch(0b011, ALU2_B, b2=B2_X)
 
-# ---- opcodes 45..47 ----
+# [45]: X = X + Y
 firmware[45] = 0b1_000000000_000_00111100_00010000_000_101_011
+
+# [46]: X = X - Y
 firmware[46] = 0b1_000000000_000_00111111_00010000_000_101_011
+
+# [47]: Y = X + Y 
 firmware[47] = 0b1_000000000_000_00111100_00001000_000_101_011
 
-# ---- opcode 48: SWAP X,Y (snapshot semantics) ----
-firmware[48] = (
-    0b1_000000000_000_00010100_00010000_000_000_100
-    | _dual(ALU2_B, A2_MBR, B2_X, W2_Y)
-)
+# [48]: SWAP X , Y
+firmware[48] = (0b1_000000000_000_00010100_00010000_000_000_100 | _dual(ALU2_B, A2_MBR, B2_X, W2_Y))
 
-# ---- opcodes 49,50 ----
+# [49]: Shifts direita e esquerda no Y
 firmware[49] = 0b1_000000000_000_01010100_00001000_000_000_100
 firmware[50] = 0b1_000000000_000_10010100_00001000_000_000_100
 
-# ---- opcodes 53..56 ----
+# [53]: Operações com H
 firmware[53] = 0b0_000000000_000_00010100_00000100_000_000_011
 firmware[54] = 0b1_000000000_000_00011000_00010000_000_000_000
 firmware[55] = 0b0_000000000_000_00010100_00000100_000_000_100
 firmware[56] = 0b1_000000000_000_00011000_00001000_000_000_000
 
-# ---- opcodes 57, 59: IF Y <= 0 / IF Y < 0 GOTO addr ---- (2 microciclos)
+# [57]: IF Y <= 0 
 firmware[57] = _branch(0b011, ALU2_B, b2=B2_Y)
+
+# [59]: IF Y < 0 GOTO addr
 firmware[59] = _branch(0b010, ALU2_B, b2=B2_Y)
 
-# ---- opcode 61: Y = Y - mem[addr] ----
-firmware[61] = (
-    0b0_010000110_000_00110101_00100000_011_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [61]: Y = Y - mem[addr] 
+firmware[61] = (0b0_010000110_000_00110101_00100000_011_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[134] = 0b1_000000000_000_00111111_00001000_000_001_100
 
-# ---- opcodes 64,65 ----
+# [64]: X = X e Y  ,   [65] : X = X ou Y
 firmware[64] = 0b1_000000000_000_00001100_00010000_000_101_011
 firmware[65] = 0b1_000000000_000_00011100_00010000_000_101_011
 
-# ---- opcode 66: X = imm ----
-firmware[66] = (
-    0b0_000000000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_X, sf2=1)
-)
+# [66]: X = imm 
+firmware[66] = (0b0_000000000_000_00110101_00100000_001_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_X, sf2=1))
 
-# ---- opcode 67: Y = imm ----
-firmware[67] = (
-    0b0_000000000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_Y, sf2=1)
-)
+# [67]: Y = imm 
+firmware[67] = (0b0_000000000_000_00110101_00100000_001_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_Y, sf2=1))
 
-# ---- opcodes 68..75 ----
+# [68 - 75]: Mexem com X, Y, Z1 e Z2  e mudam os valores entre si
 firmware[68] = 0b0_000000000_000_00010100_00000010_000_000_011
 firmware[69] = 0b0_000000000_000_00010100_00000010_000_000_100
 firmware[70] = 0b1_000000000_000_00010100_00010000_000_000_101
@@ -271,152 +243,137 @@ firmware[73] = 0b0_000000000_000_00010100_00000001_000_000_100
 firmware[74] = 0b1_000000000_000_00010100_00010000_000_000_110
 firmware[75] = 0b1_000000000_000_00010100_00001000_000_000_110
 
-# ---- opcode 76: IF X odd GOTO addr ---- (2 microciclos)
+# [76]: IF X odd GOTO addr 
 firmware[76] = _branch(0b101, ALU2_AND1, a2=A2_X)
 
-# ---- opcodes 78..80 ----
+# [78]: Y = Y - X
 firmware[78] = 0b1_000000000_000_00111111_00001000_000_100_100
+
+# [79]: X = X xou Y
 firmware[79] = 0b1_000000000_000_00000010_00010000_000_101_011
+
+# [80]: X = |X|
 firmware[80] = 0b1_000000000_000_00000011_00010000_000_100_000
 
-# ---- opcodes 83,84 ----
+# [83  e   84]: Z1 = Z1 + 1   ,  Z1 = Z1 - 1
 firmware[83] = 0b1_000000000_000_00110110_00000010_000_000_101
 firmware[84] = 0b1_000000000_000_00110101_00000010_000_000_101
 
-# ---- opcode 85: IF Z1 == 0 GOTO addr ---- (2 microciclos)
+# [85]: IF Z1 == 0 GOTO addr 
 firmware[85] = _branch(0b001, ALU2_B, b2=B2_Z1)
 
-# ---- opcode 87: Z1 = imm ----
-firmware[87] = (
-    0b0_000000000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_Z1)
-)
+# [87]: Z1 = imm 
+firmware[87] = (0b0_000000000_000_00110101_00100000_001_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_Z1))
 
-# ---- opcodes 88..91 ----
+# Operações básicas para H e Z2
 firmware[88] = 0b1_000000000_000_00111001_00000100_000_000_000
 firmware[89] = 0b1_000000000_000_00111010_00000100_000_000_000
 firmware[90] = 0b1_000000000_000_00110110_00000001_000_000_110
 firmware[91] = 0b1_000000000_000_00110101_00000001_000_000_110
 
-# ---- opcode 92: IF Z2 == 0 GOTO addr ---- (2 microciclos)
+# [92]: IF Z2 == 0 GOTO addr 
 firmware[92] = _branch(0b001, ALU2_B, b2=B2_Z2)
 
-# ---- opcodes 94..96 ----
+# Zerar H, Z1 e Z2
 firmware[94] = 0b1_000000000_000_00010000_00000100_000_000_000
 firmware[95] = 0b1_000000000_000_00010000_00000010_000_000_000
 firmware[96] = 0b1_000000000_000_00010000_00000001_000_000_000
 
-# ---- opcode 97: mem[addr] = Z1 ----
-firmware[97] = (
-    0b0_001100011_000_00110101_00100000_001_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [97]: mem[addr] = Z1 
+firmware[97] = (0b0_001100011_000_00110101_00100000_001_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[99] = 0b0_000000000_000_00010100_01000000_100_000_101
 
-# ---- opcode 100: IF X >= 0 GOTO addr ---- (2 microciclos)
+# [100]: IF X >= 0 GOTO addr 
 firmware[100] = _branch(0b110, ALU2_B, b2=B2_X)
 
+#==============================
+# Implementação do CALL e RET que serve para uso em sub-rotinas (funções). Essa implementação só aguenta uma subtina por vez porque não usa pilha
+#==============================
 
-# ---- opcode 102: CALL addr ----
-# ALU1: PC++, FETCH MBR=addr ; ALU2: Z2 = PC_snap + 1 (= endereço do byte addr)
-# Após RET, [0] fará PC++ saindo para o próximo opcode.
-firmware[102] = (
-    0b0_001101000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_Bp1, A2_MBR, B2_PC, W2_Z2)
-)
+#Call
+firmware[102] = (0b0_001101000_000_00110101_00100000_001_010_001 | _dual(ALU2_Bp1, A2_MBR, B2_PC, W2_Z2))
 firmware[104] = 0b0_000000000_100_00010100_00100000_001_000_010
 
-# ---- opcode 105: RET ----
-# PC = Z2 ; GOTO 0 (deixa [0] fazer PC++ e FETCH do próximo opcode)
+#Ret
 firmware[105] = 0b0_000000000_000_00010100_00100000_000_000_110
 
-# ---- opcodes 106..115 ----
-# IF Z1 < 0 / IF Z1 <= 0 (2 microciclos)
+
+# [106 ,  108]: IF Z1 < 0  ,  IF Z1 <= 0 
 firmware[106] = _branch(0b010, ALU2_B, b2=B2_Z1)
 firmware[108] = _branch(0b011, ALU2_B, b2=B2_Z1)
 
-# IF H == 0 / IF H < 0 / IF H <= 0  (H so existe em BUS_A -> ALU2_A) (2 microciclos)
+# [110   ,   112,    114]: IF H == 0 ,  IF H < 0   ,  IF H <= 0  
 firmware[110] = _branch(0b001, ALU2_A, a2=A2_H)
 firmware[112] = _branch(0b010, ALU2_A, a2=A2_H)
 firmware[114] = _branch(0b011, ALU2_A, a2=A2_H)
 
-# ---- opcodes 116..121 ----
-firmware[116] = 0b0_000000000_000_00011000_00000010_000_000_000
-firmware[117] = 0b0_000000000_000_00010100_00000100_000_000_101
-firmware[118] = 0b0_000000000_000_00011000_00000001_000_000_000
-firmware[119] = 0b0_000000000_000_00010100_00000100_000_000_110
-firmware[120] = 0b0_000000000_000_00010100_00000001_000_000_101
-firmware[121] = 0b0_000000000_000_00010100_00000010_000_000_110
+# [116 -  121]: Opcodes de movimentação entre os registradores.
+firmware[116] = 0b0_000000000_000_00011000_00000010_000_000_000  # Z1 = H
+firmware[117] = 0b0_000000000_000_00010100_00000100_000_000_101  # H = Z1
+firmware[118] = 0b0_000000000_000_00011000_00000001_000_000_000  # Z2 = H
+firmware[119] = 0b0_000000000_000_00010100_00000100_000_000_110  # H = Z2
+firmware[120] = 0b0_000000000_000_00010100_00000001_000_000_101  # Z2 = Z1
+firmware[121] = 0b0_000000000_000_00010100_00000010_000_000_110  # Z1 = Z2
 
-# ---- opcode 122: mem[addr] = Z2 ----
-firmware[122] = (
-    0b0_001111100_000_00110101_00100000_001_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [122]: mem[addr] = Z2 
+firmware[122] = (0b0_001111100_000_00110101_00100000_001_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[124] = 0b0_000000000_000_00010100_01000000_100_000_110
 
-# ---- opcodes 125..127, 137 ----
-firmware[125] = 0b1_000000000_000_00111100_00010000_000_110_011
-firmware[126] = 0b1_000000000_000_00111111_00010000_000_110_011
-firmware[127] = 0b1_000000000_000_00111100_00001000_000_110_100
-firmware[137] = 0b1_000000000_000_00111111_00001000_000_110_100
+# Mexendo com Z1, X e Y
+firmware[125] = 0b1_000000000_000_00111100_00010000_000_110_011  # X = X + Z1
+firmware[126] = 0b1_000000000_000_00111111_00010000_000_110_011  # X = X - Z1
+firmware[127] = 0b1_000000000_000_00111100_00001000_000_110_100  # Y = Y + Z1
+firmware[137] = 0b1_000000000_000_00111111_00001000_000_110_100  # Y = Y - Z1
 
-# ---- opcodes 140..147 ----
-firmware[140] = 0b0_010001101_000_00010100_10000000_010_000_101
+# Acessando a memória por Z1 e colocando nela também
+firmware[140] = 0b0_010001101_000_00010100_10000000_010_000_101 # X = mem[Z1]
 firmware[141] = 0b1_000000000_000_00010100_00010000_000_000_000
-firmware[142] = 0b0_010001111_000_00010100_10000000_010_000_101
-firmware[143] = 0b1_000000000_000_00010100_00001000_000_000_000
+
+firmware[142] = 0b0_010001111_000_00010100_10000000_010_000_101 # Y = mem[Z1]
+firmware[143] = 0b1_000000000_000_00010100_00001000_000_000_000 
+
 firmware[144] = 0b0_010010001_000_00010100_10000000_000_000_101
-firmware[145] = 0b0_000000000_000_00010100_01000000_100_000_011
-firmware[146] = 0b0_010010011_000_00010100_10000000_000_000_101
+firmware[145] = 0b0_000000000_000_00010100_01000000_100_000_011 # mem[Z1] = X
+
+firmware[146] = 0b0_010010011_000_00010100_10000000_000_000_101 # mem[Z1] = Y
 firmware[147] = 0b0_000000000_000_00010100_01000000_100_000_100
 
-# ---- opcode 148: Z1 = mem[addr] ----
-firmware[148] = (
-    0b0_010010110_000_00110101_00100000_011_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [148]: Z1 = mem[addr] 
+firmware[148] = (0b0_010010110_000_00110101_00100000_011_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[150] = 0b1_000000000_000_00010100_00000010_000_000_000
 
-# ---- opcode 151: Z2 = mem[addr] ----
-firmware[151] = (
-    0b0_010011001_000_00110101_00100000_011_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR)
-)
+# [151]: Z2 = mem[addr] 
+firmware[151] = (0b0_010011001_000_00110101_00100000_011_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_MAR))
 firmware[153] = 0b1_000000000_000_00010100_00000001_000_000_000
 
-# ---- opcode 154: Z2 = imm ----
-firmware[154] = (
-    0b0_000000000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_Z2)
-)
+# [154]: Z2 = imm 
+firmware[154] = (0b0_000000000_000_00110101_00100000_001_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_Z2))
 
-# ---- opcode 156: H = imm ----
-firmware[156] = (
-    0b0_000000000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_B, A2_MBR, B2_MBR, W2_H)
-)
+# [156]: H = imm 
+firmware[156] = (0b0_000000000_000_00110101_00100000_001_010_001 | _dual(ALU2_B, A2_MBR, B2_MBR, W2_H))
 
-# ---- opcodes 158,159 ----
-firmware[158] = 0b1_000000000_000_00111100_00000010_000_101_011
-firmware[159] = 0b1_000000000_000_00111111_00000010_000_101_011
+# Fazendo operações com X e Y e colocando o valor em Z1
+firmware[158] = 0b1_000000000_000_00111100_00000010_000_101_011 # Z1 = X + Y
+firmware[159] = 0b1_000000000_000_00111111_00000010_000_101_011 # Z1 = X - Y
 
 
-# ============================================================================
-# NOVOS OPCODES (Questionamentos #3, #8, #12, #15)
-# ============================================================================
+# [160]: X = X AND imm  
+firmware[160] = (0b0_000000000_000_00110101_00100000_001_010_001 | _dual(ALU2_AaB, A2_X, B2_MBR, W2_X, sf2=1))
 
-# ---- opcode 160: X = X AND imm  (AND imediato — #15) ---- 1 microciclo
-# ALU1 faz PC++/FETCH (MBR=imm) e a ALU2 calcula X & MBR no mesmo ciclo.
-firmware[160] = (
-    0b0_000000000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_AaB, A2_X, B2_MBR, W2_X, sf2=1)
-)
 
-# ---- opcode 162: X = X * Y  (multiplicacao shift-and-add — #12) ----
-# Destroi Y e H. B=X (multiplicador, shift dir.), A=Y (multiplicando, shift esq.),
-# acumulador em H. Por iteracao a ALU1 desloca X>>1 enquanto a ALU2 desloca Y<<1
-# no MESMO microciclo (paralelismo da ALU dupla, #12/#17).
+#===================================================================
+#Implementação do Shift and Add, imita o código abaixo com opcodes
+# ==================================================================
+#H = 0;
+#while (X != 0){
+#    if (X & 1)
+#        H = H + Y;
+#    X = X >> 1;
+#    Y = Y << 1;
+#}
+#X = H;
+#===================================================================
+
 firmware[162] = 0b0_011001000_000_00010000_00000100_000_000_000   # H = 0 ; goto 200
 # 200: if X == 0 -> fim (457) ; senao testa LSB (201)
 firmware[200] = 0b1_011001001_001_00010100_00000000_000_000_011
@@ -425,21 +382,25 @@ firmware[201] = 0b1_011001011_101_00000001_00000000_000_100_000
 # 459 (=201|256): H = H + Y ; goto 203
 firmware[459] = 0b0_011001011_000_00111100_00000100_000_000_100
 # 203: X = X >> 1 (ALU1)  ||  Y = Y << 1 (ALU2) ; goto 200
-firmware[203] = (
-    0b0_011001000_000_10010100_00010000_000_000_011
-    | _dual(ALU2_Bshl, A2_MBR, B2_Y, W2_Y)
-)
+firmware[203] = (0b0_011001000_000_10010100_00010000_000_000_011 | _dual(ALU2_Bshl, A2_MBR, B2_Y, W2_Y))
 # 457 (=200|256): X = H (resultado) ; goto 0
 firmware[457] = 0b0_000000000_000_00011000_00010000_000_000_000
 
-# ---- opcodes 165, 166: X = X >> 8 / Y = Y >> 8  (extracao de byte — #13) ----
-# Shift-direito de 8 nativo (a ISA so tinha >>1 e <<8). 1 microciclo.
-firmware[165] = 0b1_000000000_000_00000100_00010000_000_000_011   # X = X >> 8
-firmware[166] = 0b1_000000000_000_00000100_00001000_000_000_100   # Y = Y >> 8
+#FIM DO SHIFT AND ADD
+
+
+
+# [165, 166]:   X = X >> 8   ,    Y = Y >> 8  
+firmware[165] = 0b1_000000000_000_00000100_00010000_000_000_011   
+firmware[166] = 0b1_000000000_000_00000100_00001000_000_000_100   
 
 # ============================================================================
-# DIVISAO / MODULO BINARIOS O(log N)  (Questionamentos #3 e #8)
-# ----------------------------------------------------------------------------
+# DIVISAO BINARIA SEM USAR / 
+# Isso faz:
+# quociente = dividendo / divisor
+# A ideia é igual a divisão normal.
+# Em vez de procurar múltiplos decimais do divisor,procuramos múltiplos em potências de 2.
+
 # Algoritmo "escala-sobe / escala-desce" (long division binaria):
 #   R = N(=X) ; M = D(=Y) ; P = 1(=H) ; [div] Q = 0(=Z1)
 #   sobe : enquanto M <= R: M<<=1 ; P<<=1            (ate M passar de R)
@@ -449,58 +410,33 @@ firmware[166] = 0b1_000000000_000_00000100_00001000_000_000_100   # Y = Y >> 8
 # ALU1 desloca M, e soma Q no MESMO ciclo da subtracao de R (#4/#9 paralelismo).
 # PRE-CONDICOES: Y > 0 e dividendo X < 2^31 (evita overflow no escalonamento).
 
-# ---- opcode 163: X = X // Y  (quociente) ---- destroi Y(=M), H(=P), Z1(=Q)
-firmware[163] = (
-    0b0_011111010_000_00110001_00000100_000_000_000      # P=1 (H) || Q=0 (Z1) ; goto 250
-    | _dual(ALU2_ZERO, A2_H, B2_MDR, W2_Z1)
-)
+# [163]: X = X // Y  
+firmware[163] = (0b0_011111010_000_00110001_00000100_000_000_000  | _dual(ALU2_ZERO, A2_H, B2_MDR, W2_Z1))  # P=1 (H) || Q=0 (Z1) ; goto 250
 firmware[250] = 0b1_011111011_010_00111111_00000000_000_101_011   # R-M ; R<D -> 507 ; senao 251
 firmware[251] = 0b1_011111100_010_00111111_00000000_000_101_011   # R-M ; M>R -> 508 ; senao 252
-firmware[252] = (
-    0b0_011111011_000_01010100_00001000_000_000_100      # M=M<<1 || P=P<<1 ; goto 251
-    | _dual(ALU2_Ashl, A2_H, B2_MDR, W2_H)
-)
-firmware[508] = (
-    0b0_011111101_000_10010100_00001000_000_000_100      # recua: M=M>>1 || P=P>>1 ; goto 253
-    | _dual(ALU2_Ashr, A2_H, B2_MDR, W2_H)
-)
+firmware[252] = (0b0_011111011_000_01010100_00001000_000_000_100 | _dual(ALU2_Ashl, A2_H, B2_MDR, W2_H))   # M=M<<1 || P=P<<1 ; goto 251
+firmware[508] = (0b0_011111101_000_10010100_00001000_000_000_100  | _dual(ALU2_Ashr, A2_H, B2_MDR, W2_H))  # recua: M=M>>1 || P=P>>1 ; goto 253
 firmware[253] = 0b1_011111110_010_00111111_00000000_000_101_011   # R-M ; R<M -> 510 ; senao 254
-firmware[254] = (
-    0b0_011111000_000_00111111_00010000_000_101_011      # R=R-M || Q=Q+P ; goto 248
-    | _dual(ALU2_ApB, A2_H, B2_Z1, W2_Z1)
-)
+firmware[254] = (0b0_011111000_000_00111111_00010000_000_101_011  | _dual(ALU2_ApB, A2_H, B2_Z1, W2_Z1))   # R=R-M || Q=Q+P ; goto 248
 firmware[510] = 0b0_011111000_000_00010100_00000000_000_000_011   # pula subtracao ; goto 248
 firmware[248] = 0b1_011111001_001_00111010_00000000_000_000_000   # P-1 ; P==1 -> 505 ; senao 249
-firmware[249] = (
-    0b0_011111101_000_10010100_00001000_000_000_100      # M=M>>1 || P=P>>1 ; goto 253
-    | _dual(ALU2_Ashr, A2_H, B2_MDR, W2_H)
-)
+firmware[249] = (0b0_011111101_000_10010100_00001000_000_000_100 | _dual(ALU2_Ashr, A2_H, B2_MDR, W2_H))   # M=M>>1 || P=P>>1 ; goto 253
 firmware[507] = 0b0_000000000_000_00010100_00010000_000_000_101   # X = Q (Z1) ; goto 0
 firmware[505] = 0b0_000000000_000_00010100_00010000_000_000_101   # X = Q (Z1) ; goto 0
 
-# ---- opcode 164: X = X % Y  (resto) ---- destroi Y(=M), H(=P) ; Z1/Z2 preservados
+# [164]: X = X % Y  
 firmware[164] = 0b0_011110000_000_00110001_00000100_000_000_000   # P=1 (H) ; goto 240
 firmware[240] = 0b1_011110001_010_00111111_00000000_000_101_011   # R-M ; R<D -> 497 ; senao 241
 firmware[241] = 0b1_011110010_010_00111111_00000000_000_101_011   # R-M ; M>R -> 498 ; senao 242
-firmware[242] = (
-    0b0_011110001_000_01010100_00001000_000_000_100      # M=M<<1 || P=P<<1 ; goto 241
-    | _dual(ALU2_Ashl, A2_H, B2_MDR, W2_H)
-)
-firmware[498] = (
-    0b0_011110100_000_10010100_00001000_000_000_100      # recua: M=M>>1 || P=P>>1 ; goto 244
-    | _dual(ALU2_Ashr, A2_H, B2_MDR, W2_H)
-)
+firmware[242] = (0b0_011110001_000_01010100_00001000_000_000_100 | _dual(ALU2_Ashl, A2_H, B2_MDR, W2_H))  # M=M<<1 || P=P<<1 ; goto 241
+firmware[498] = (0b0_011110100_000_10010100_00001000_000_000_100 | _dual(ALU2_Ashr, A2_H, B2_MDR, W2_H))  # recua: M=M>>1 || P=P>>1 ; goto 244
 firmware[244] = 0b1_011110101_010_00111111_00000000_000_101_011   # R-M ; R<M -> 501 ; senao 245
 firmware[245] = 0b0_011110110_000_00111111_00010000_000_101_011   # R=R-M ; goto 246
 firmware[501] = 0b0_011110110_000_00010100_00000000_000_000_011   # pula subtracao ; goto 246
 firmware[246] = 0b1_011110111_001_00111010_00000000_000_000_000   # P-1 ; P==1 -> 503 ; senao 247
-firmware[247] = (
-    0b0_011110100_000_10010100_00001000_000_000_100      # M=M>>1 || P=P>>1 ; goto 244
-    | _dual(ALU2_Ashr, A2_H, B2_MDR, W2_H)
-)
+firmware[247] = (0b0_011110100_000_10010100_00001000_000_000_100 | _dual(ALU2_Ashr, A2_H, B2_MDR, W2_H))   # M=M>>1 || P=P>>1 ; goto 244
 firmware[497] = 0b0_000000000_000_00010100_00010000_000_000_011   # X = R (ja em X) ; goto 0
 firmware[503] = 0b0_000000000_000_00010100_00010000_000_000_011   # X = R (ja em X) ; goto 0
-
 firmware[255] = 0b0_000000000_000_00000000_00000000_000_000_000
 
 # ============================================================================
@@ -537,59 +473,46 @@ firmware[170] = (
 # bpackx : anexa o byte baixo de Y a X -> X = (X<<8) | (Y & 0xFF). Primitiva de
 #   empacotamento (inverso do bext): zera, e para cada byte faz bpackx.
 
-# ---- opcode 171: X = byte[imm] de X  =  (X >> 8*imm) & 0xFF ----
-firmware[171] = (
-    0b0_000000000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_BEXT, A2_X, B2_MBR, W2_X, sf2=1)
-)
-# ---- opcode 172: Y = byte[imm] de Y  =  (Y >> 8*imm) & 0xFF ----
-firmware[172] = (
-    0b0_000000000_000_00110101_00100000_001_010_001
-    | _dual(ALU2_BEXT, A2_Y, B2_MBR, W2_Y, sf2=1)
-)
-# ---- opcode 173: X = (X << 8) | (Y & 0xFF)  (empacota byte de Y em X) ----
+# [171]: X = byte[imm] de X  =  (X >> 8*imm) & 0xFF 
+firmware[171] = (0b0_000000000_000_00110101_00100000_001_010_001 | _dual(ALU2_BEXT, A2_X, B2_MBR, W2_X, sf2=1))
+# [172]: Y = byte[imm] de Y  =  (Y >> 8*imm) & 0xFF 
+firmware[172] = (0b0_000000000_000_00110101_00100000_001_010_001 | _dual(ALU2_BEXT, A2_Y, B2_MBR, W2_Y, sf2=1))
+# [173]: X = (X << 8) | (Y & 0xFF)  (empacota byte de Y em X) 
 firmware[173] = 0b1_000000000_000_00001001_00010000_000_100_100
 
 # ============================================================================
 # OPCODES DE OTIMIZACAO (acumulo e compare-and-swap em registradores)
 # ============================================================================
-# ---- opcode 174: Z1 = Z1 + X  (acumula em 1 microciclo; X preservado) ----
-# Substitui o par addxz1 + xtoz1 (2 µc) por 1 µc, sem destruir X.
+# [174]: Z1 = Z1 + X  
 firmware[174] = 0b1_000000000_000_00111100_00000010_000_110_011
 
-# ---- opcode 175: IF X <= Y GOTO addr  (compara DOIS registradores) ---- 2 µc
+# [175]: IF X <= Y GOTO addr   
 # A ALU2 calcula X - Y e o JAM usa (N|Z): salto tomado se X <= Y. Permite
 # compare-and-swap em registradores (jlexy + swap) sem passar pela memoria.
 firmware[175] = _branch(0b011, ALU2_BmA, a2=A2_Y, b2=B2_X)
 
-# ---- opcode 176: IF X < Y GOTO addr  (estrito) ---- 2 µc
+# [176]: IF X < Y GOTO addr  
 # Limite de laco em 1 instrucao (ex.: quot < d) sem destruir X; substitui o
 # par subxy + jn (5 µc -> 3 µc) e preserva o quociente.
 firmware[176] = _branch(0b010, ALU2_BmA, a2=A2_Y, b2=B2_X)
 
-# ---- opcode 177: X = ordena os 4 bytes de X (rede combinacional) ---- 1 µc
+# [177]: X = ordena os 4 bytes de X (rede combinacional) 
 # Sorting network de 4 elementos em hardware (min/max branchless). Menor no MSB.
 firmware[177] = 0b1_000000000_000_00001010_00010000_000_100_000
 
-# ---- opcode 178: X = produto escalar bytewise de X e Y ---- 1 µc
+# [178]: X = produto escalar bytewise de X e Y 
 # 4 multiplicadores de 8 bits + somador (MAC) em hardware combinacional.
 firmware[178] = 0b1_000000000_000_00001011_00010000_000_100_100
 
-# ---- opcode 179: X = Z1 // Y , H = Z1 % Y  (divmod com dividendo em Z1) ---- 1 µc
-# Evita o 'z1tox' antes do divmod no laco (economia 1 instrucao/iter).
-firmware[179] = (
-    0b1_000000000_000_00000110_00010000_000_110_100
-    | _dual(ALU2_MOD, A2_Z1, B2_Y, W2_H)
-)
-# ---- opcode 181: X = Z2 // Y , H = Z2 % Y  (divmod com dividendo em Z2) ---- 1 µc
+# [179]: X = Z1 // Y , H = Z1 % Y  (divmod com dividendo em Z1) 
+# Evita o 'z1tox' antes do divmod no laco
+firmware[179] = (0b1_000000000_000_00000110_00010000_000_110_100 | _dual(ALU2_MOD, A2_Z1, B2_Y, W2_H))
+# [181]: X = Z2 // Y , H = Z2 % Y  (divmod com dividendo em Z2) 
 # (180 = NT_SLOT, reservado.)
-firmware[181] = (
-    0b1_000000000_000_00000110_00010000_000_111_100
-    | _dual(ALU2_MOD, A2_Z2, B2_Y, W2_H)
-)
+firmware[181] = (0b1_000000000_000_00000110_00010000_000_111_100 | _dual(ALU2_MOD, A2_Z2, B2_Y, W2_H))
 
 # ============================================================================
-# FUNÇÕES
+# Funções do processador.
 # ============================================================================
 
 def read_regs(bus_a_sel, bus_b_sel):
@@ -623,11 +546,11 @@ def write_regs2(w2, val):
     elif w2 == W2_PC:  PC  = val
 
 
-# ----------------------------------------------------------------------------
-# COMBINADORES DE MUL / DIV (sem laco, sem '*'/'/'/'%', sem relacionais).
+# ============================================================================
+# COMBINADORES DE MUL / DIV 
 # Modelam o hardware: o multiplicador e um array de 32 somadores de produtos
 # parciais; o divisor sao 32 estagios de divisao restauradora desenrolados.
-# ----------------------------------------------------------------------------
+# ============================================================================
 def _mul32(a, b):
     # Soma dos produtos parciais: para cada bit i de b, soma (a<<i) mascarado.
     # -((b>>i)&1) vale 0 (bit zero) ou -1 (= todos-1, bit um), funcionando como
@@ -671,7 +594,7 @@ def _mul32(a, b):
 
 def _divstep(q, r, bit, b):
     # Um estagio da divisao restauradora. O emprestimo de (r-b) e detectado pelo
-    # bit de sinal (deslocamento aritmetico de Python), evitando o operador '<'.
+    # bit de sinal evitando o operador '<'.
     r  = (r << 1) | bit
     bf = ((r - b) >> 40) & 1        # 1 => houve emprestimo (r < b)
     r  = r if bf else r - b        # so subtrai quando NAO houve emprestimo
@@ -722,10 +645,10 @@ def _divmod32(a, b):
     return q & 0xFFFFFFFF, r & 0xFFFFFFFF
 
 
-# ----------------------------------------------------------------------------
+# ============================================================================
 # MIN/MAX branchless e combinadores de byte (ordenacao e produto escalar).
 # Sem laco, sem '*'/'/'/'%', sem relacionais: o sinal de (a-b) escolhe o menor.
-# ----------------------------------------------------------------------------
+# ============================================================================
 def _mn(a, b):
     d = a - b
     m = d >> 40                 # 0 se a>=b ; -1 (todos-1) se a<b
